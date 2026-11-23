@@ -120,3 +120,8 @@ python3 package.py
 El último comando genera `dist/registros_camaras.zip` para instalación manual.
 HACS instala desde los archivos del repositorio correspondientes a la release.
 La CI ejecuta comprobaciones estáticas Python, Hassfest y HACS; no ejecuta tests.
+
+## Licencia
+
+Copyright (C) 2026 Siroguh. Este cliente se distribuye bajo **GPL-3.0-only**,
+GNU General Public License versión 3. Consulta [LICENSE](LICENSE).

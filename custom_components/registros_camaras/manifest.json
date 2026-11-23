@@ -1,6 +1,7 @@
 {
   "domain": "registros_camaras",
   "name": "Registros Cámaras",
+  "categories": ["climate"],
   "codeowners": ["@Siroguh"],
   "config_flow": true,
   "documentation": "https://github.com/Siroguh/ha-registros-camaras",
