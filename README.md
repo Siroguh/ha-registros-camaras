@@ -21,6 +21,8 @@ con controles operativos y confirmaciones compartidas (migración `0018`).
 La versión 0.2 incorpora entidades por cámara: rangos de consigna vigente, origen,
 fin de consigna manual, indicador de cambio pendiente y botón de confirmación.
 Ofrece acciones `create_lot`, `register_movement`, `set_manual` y `confirm_change`.
+La versión 0.3 añade `update_movement`, `update_manual` y `finish_manual`, además
+de las lecturas `movements` y `manuals` en el puente WebSocket.
 Los campos se muestran en la interfaz de acciones de HA y se pueden usar en automatizaciones.
 Los controles interactivos requieren un administrador de HA; las automatizaciones locales
 también pueden llamar a las acciones. Todas las operaciones se validan en la API.
@@ -62,8 +64,9 @@ hash SHA-256 y un prefijo identificativo. La clave existente de HA que utiliza e
 para recoger lecturas es otra credencial, para la dirección contraria.
 
 El servidor concede `connection:read`, `cameras:read`, `lots:write`, `movements:write`,
-`consignas:write` y `consignas:confirm`. Incluye lecturas necesarias y altas operativas,
-no borrados, edición de planes ni correcciones históricas. La clave no abre sesiones
+`consignas:write`, `consignas:confirm`, `consignas:edit`, `consignas:finish`,
+`movements:read` y `movements:edit`. Incluye lecturas, altas y correcciones operativas,
+sin borrados ni edición de planes. La clave no abre sesiones
 Better Auth, no permite gestionar otras claves y no da acceso al visor de base de datos.
 Las claves existentes obtienen estas capacidades al actualizar el servidor.
 Una cuenta de la aplicación se configura una sola vez en HA; cambiar de clave conserva las entidades.
@@ -103,6 +106,12 @@ El estado de cámaras se consulta con `GET /api/v1/integration/dashboard`. Las a
 usan los mismos endpoints públicos de lotes, movimientos y consignas que la web.
 `GET /api/v1/lotes/:id/opciones-movimiento?fecha=YYYY-MM-DD` devuelve las porciones
 disponibles para esa fecha; HA no reconstruye ni valida genealogías.
+Al corregir, `movimientoId` limita esas porciones al instante anterior a la operación,
+respetando su orden dentro del día. El servidor revalida también los movimientos posteriores.
+Las ediciones usan `PUT` sobre el movimiento o consigna identificados, con revisión optimista.
+`POST /api/v1/ubicaciones/:id/consignas/:consignaId/finalizar` recibe `{ revision }`
+y termina únicamente una manual vigente, usando la hora del servidor y conservando el historial.
+Requiere el servidor padre actualizado con estas capacidades; no necesita migraciones nuevas.
 
 ## Confirmaciones y notificaciones
 

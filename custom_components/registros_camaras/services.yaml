@@ -66,3 +66,63 @@ confirm_change:
       description: Identificador del atributo pending.id del indicador de cambio pendiente.
       selector:
         text:
+update_manual:
+  name: Editar manual
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    location_id:
+      required: true
+      selector:
+        text:
+    manual_id:
+      required: true
+      selector:
+        text:
+    payload:
+      required: true
+      selector:
+        object:
+finish_manual:
+  name: Finalizar manual
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    location_id:
+      required: true
+      selector:
+        text:
+    manual_id:
+      required: true
+      selector:
+        text:
+    payload:
+      required: true
+      selector:
+        object:
+update_movement:
+  name: Corregir movimiento
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    lot_id:
+      required: true
+      selector:
+        text:
+    movement_id:
+      required: true
+      selector:
+        text:
+    payload:
+      required: true
+      selector:
+        object:

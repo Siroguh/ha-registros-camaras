@@ -37,7 +37,7 @@ class RegistrosCoordinator(DataUpdateCoordinator[IntegrationStatus]):
         except AuthenticationError as err:
             self.config_entry.async_start_reauth(self.hass)
             raise ConfigEntryAuthFailed("La clave no es válida o ha sido revocada") from err
-        if operation not in {"lots", "movement_options"}:
+        if operation not in {"lots", "movement_options", "movements", "manuals"}:
             await self.async_request_refresh()
         return result
 

@@ -18,8 +18,21 @@ OPERATIONS = [
     "register_movement",
     "set_manual",
     "confirm_change",
+    "movements",
+    "update_movement",
+    "manuals",
+    "update_manual",
+    "finish_manual",
 ]
-WRITES = ["create_lot", "register_movement", "set_manual", "confirm_change"]
+WRITES = [
+    "create_lot",
+    "register_movement",
+    "set_manual",
+    "confirm_change",
+    "update_movement",
+    "update_manual",
+    "finish_manual",
+]
 
 
 def coordinator(hass: HomeAssistant, entry_id: str):
@@ -87,10 +100,14 @@ async def async_register(hass: HomeAssistant) -> None:
 
     for name in WRITES:
         fields: dict[Any, Any] = {vol.Required("entry_id"): str}
-        if name in {"set_manual", "confirm_change"}:
+        if name in {"set_manual", "confirm_change", "update_manual", "finish_manual"}:
             fields[vol.Required("location_id")] = str
-        if name == "register_movement":
+        if name in {"register_movement", "update_movement"}:
             fields[vol.Required("lot_id")] = str
+        if name == "update_movement":
+            fields[vol.Required("movement_id")] = str
+        if name in {"update_manual", "finish_manual"}:
+            fields[vol.Required("manual_id")] = str
         if name == "confirm_change":
             fields[vol.Required("proposal_id")] = str
         else:

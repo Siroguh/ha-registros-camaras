@@ -138,6 +138,8 @@ class RegistrosClient:
     async def async_operation(self, operation: str, data: dict) -> dict:
         location = quote(str(data.get("location_id", "")), safe="")
         lot = quote(str(data.get("lot_id", "")), safe="")
+        movement = quote(str(data.get("movement_id", "")), safe="")
+        manual = quote(str(data.get("manual_id", "")), safe="")
         match operation:
             case "lots":
                 query = urlencode(
@@ -149,8 +151,29 @@ class RegistrosClient:
                 )
                 return await self._request("GET", f"lotes?{query}")
             case "movement_options":
-                query = urlencode({"fecha": data.get("date", "")})
+                params = {"fecha": data.get("date", "")}
+                if data.get("movement_id"):
+                    params["movimientoId"] = data["movement_id"]
+                query = urlencode(params)
                 return await self._request("GET", f"lotes/{lot}/opciones-movimiento?{query}")
+            case "movements":
+                return await self._request("GET", f"lotes/{lot}/movimientos")
+            case "update_movement":
+                return await self._request(
+                    "PUT", f"lotes/{lot}/movimientos/{movement}", data.get("payload", {})
+                )
+            case "manuals":
+                return await self._request("GET", f"ubicaciones/{location}/consignas")
+            case "update_manual":
+                return await self._request(
+                    "PUT", f"ubicaciones/{location}/consignas/{manual}", data.get("payload", {})
+                )
+            case "finish_manual":
+                return await self._request(
+                    "POST",
+                    f"ubicaciones/{location}/consignas/{manual}/finalizar",
+                    data.get("payload", {}),
+                )
             case "create_lot":
                 return await self._request("POST", "lotes", data.get("payload", {}))
             case "register_movement":
