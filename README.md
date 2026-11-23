@@ -2,7 +2,7 @@
 
 Cliente de la API REST de **Registros Cámaras**, instalable como integración personalizada
 de HACS. Requiere Home Assistant **2026.10 o posterior** y el servidor de Registros Cámaras
-con soporte para claves de integración (migración `0017`).
+con controles operativos y confirmaciones compartidas (migración `0018`).
 
 ## Qué incluye esta versión
 
@@ -13,8 +13,16 @@ con soporte para claves de integración (migración `0017`).
 - Diagnósticos sin claves, direcciones del servidor ni datos personales.
 - Interfaz en español e inglés.
 
-Esta entrega es la base de conexión. Todavía no ofrece acciones para crear lotes,
-registrar movimientos, cambiar consignas ni confirmar cambios automáticos.
+La versión 0.2 incorpora entidades por cámara: rangos de consigna vigente, origen,
+fin de consigna manual, indicador de cambio pendiente y botón de confirmación.
+Ofrece acciones `create_lot`, `register_movement`, `set_manual` y `confirm_change`.
+Los campos se muestran en la interfaz de acciones de HA y se pueden usar en automatizaciones.
+Los controles interactivos requieren un administrador de HA; las automatizaciones locales
+también pueden llamar a las acciones. Todas las operaciones se validan en la API.
+
+Para los formularios visuales instala un único complemento adicional de HACS:
+[Registros Cámaras — Tarjetas](https://github.com/Siroguh/registros-camaras-cards).
+Incluye tres tarjetas independientes y editores visuales, sin copiar archivos ni escribir YAML.
 
 ## Instalar con HACS
 
@@ -25,11 +33,9 @@ registrar movimientos, cambiar consignas ni confirmar cambios automáticos.
 4. Reinicia Home Assistant.
 5. En **Ajustes → Dispositivos y servicios → Añadir integración**, busca **Registros Cámaras**.
 
-El repositorio se añade como personalizado; no es necesario que figure en el catálogo general.
+El repositorio es exclusivamente personalizado. No se solicita ni se pretende su inclusión
+en el catálogo general. La validación HACS comprueba formato técnico, no registra el proyecto.
 HACS gestiona los archivos del cliente y sus actualizaciones, no el servidor de la aplicación.
-
-Para instalar manualmente, copia `custom_components/registros_camaras` a la carpeta
-`config/custom_components/registros_camaras` de Home Assistant y reinícialo.
 
 ## Conectar
 
@@ -50,8 +56,11 @@ archivos del repositorio, YAML público ni código Python. El servidor guarda ú
 hash SHA-256 y un prefijo identificativo. La clave existente de HA que utiliza el servidor
 para recoger lecturas es otra credencial, para la dirección contraria.
 
-Esta versión concede exclusivamente `connection:read`. La clave no abre sesiones Better Auth,
-no permite gestionar otras claves y no da acceso al visor de la base de datos ni a escrituras.
+El servidor concede `connection:read`, `cameras:read`, `lots:write`, `movements:write`,
+`consignas:write` y `consignas:confirm`. Incluye lecturas necesarias y altas operativas,
+no borrados, edición de planes ni correcciones históricas. La clave no abre sesiones
+Better Auth, no permite gestionar otras claves y no da acceso al visor de base de datos.
+Las claves existentes obtienen estas capacidades al actualizar el servidor.
 Una cuenta de la aplicación se configura una sola vez en HA; cambiar de clave conserva las entidades.
 
 ## Estado y mantenimiento
@@ -85,11 +94,34 @@ El contrato inicial es `GET /api/v1/integration/status`, autenticado con
 la URL y de las rotaciones de clave. Nuevas capacidades se implementarán en la API y después
 se expondrán como acciones o entidades de HA; no se acepta una ruta HTTP arbitraria desde acciones.
 
-La siguiente entrega prevista abarca lotes, movimientos completos o partidos con fecha,
-consignas manuales y confirmación de cambios automáticos. La decisión acordada es mantener
-la última consigna confirmada mientras la nueva está pendiente. Ese estado y su confirmación
-pertenecerán al servidor, para compartirlos entre HA y la web; esta versión no modifica todavía
-el cálculo de consignas existente.
+El estado de cámaras se consulta con `GET /api/v1/integration/dashboard`. Las altas
+usan los mismos endpoints públicos de lotes, movimientos y consignas que la web.
+`GET /api/v1/lotes/:id/opciones-movimiento?fecha=YYYY-MM-DD` devuelve las porciones
+disponibles para esa fecha; HA no reconstruye ni valida genealogías.
+
+## Confirmaciones y notificaciones
+
+La API conserva la última automática confirmada mientras una propuesta nueva está pendiente.
+Sin primera confirmación no hay automática vigente. Una consigna manual domina durante su
+intervalo; al terminar vuelve la última automática confirmada, con propuesta pendiente si
+el plan actual difiere. Si la cámara queda vacía, faltan reglas o hay conflicto, la propuesta
+es retirar la automática y también requiere confirmación. No se envían órdenes a actuadores.
+
+La propuesta tiene un UUID propio. Tarjeta, botón, notificación y web confirman mediante
+`POST /api/v1/ubicaciones/:id/confirmacion` con `{ "propuestaId": "..." }`. El servidor
+recalcula dentro de una transacción y rechaza propuestas obsoletas con HTTP 409.
+Las propuestas se detectan en las consultas (HA sondea cada 60 segundos).
+
+En **Ajustes → Dispositivos y servicios → Registros Cámaras → Configurar** puedes elegir
+un servicio `notify.mobile_app_…` para notificaciones accionables o avisos persistentes
+dentro de HA. Por defecto están desactivadas. Las notificaciones móviles incluyen
+**Confirmar esta propuesta**; los avisos persistentes remiten al botón o tarjeta.
+Una propuesta se notifica una vez mientras permanece pendiente durante esa carga de la
+integración; reiniciar o recargar HA puede volver a notificarla. Una notificación antigua
+nunca confirma silenciosamente una propuesta nueva.
+
+Las tarjetas hablan con el puente WebSocket de la integración, no directamente con la
+API. El puente tiene una lista cerrada de operaciones y no expone la clave ni acepta URLs.
 
 ## Código fuente y publicación
 

@@ -38,5 +38,14 @@
       "unique_id_mismatch": "The connection belongs to a different application account."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Pending change notifications",
+        "description": "Choose a mobile_app notification service for actionable notifications, or a notification in Home Assistant. The application API validates every confirmation.",
+        "data": { "notify_service": "Notification service" }
+      }
+    }
+  },
   "entity": { "binary_sensor": { "connection": { "name": "Connection" } } }
 }

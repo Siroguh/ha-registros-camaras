@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from aiohttp import ClientError, ClientSession, ClientTimeout
 from yarl import URL
@@ -18,6 +19,10 @@ class CannotConnect(ApiError):
 
 
 class IncompatibleApi(ApiError):
+    pass
+
+
+class RequestError(ApiError):
     pass
 
 
@@ -50,7 +55,7 @@ class RegistrosClient:
         self.base_url = normalize_url(base_url)
         self._api_key = api_key.strip()
 
-    async def _request(self, method: str, path: str) -> Any:
+    async def _request(self, method: str, path: str, payload: dict | None = None) -> Any:
         try:
             async with self._session.request(
                 method,
@@ -62,12 +67,19 @@ class RegistrosClient:
                 timeout=ClientTimeout(total=10),
                 allow_redirects=False,
                 raise_for_status=False,
+                json=payload,
             ) as response:
                 if response.status in {401, 403}:
                     raise AuthenticationError("Invalid, revoked or unauthorized API key")
-                if response.status == 404:
-                    raise IncompatibleApi("The integration endpoint is not available")
-                if response.status != 200:
+                if response.status == 404 and path.startswith("integration/"):
+                    raise IncompatibleApi("Actualiza el servidor: falta el endpoint de integración")
+                if response.status in {400, 404, 409, 422}:
+                    data = await response.json()
+                    error = data.get("error") if isinstance(data, dict) else None
+                    message = error.get("message") if isinstance(error, dict) else None
+                    message = message or "Operación rechazada por la API"
+                    raise RequestError(str(message))
+                if response.status not in {200, 201}:
                     raise CannotConnect(f"API returned HTTP {response.status}")
                 return await response.json()
         except (ClientError, TimeoutError) as err:
@@ -98,3 +110,62 @@ class RegistrosClient:
             api_version=data["apiVersion"],
             capabilities=tuple(data["capabilities"]),
         )
+
+    async def async_dashboard(self) -> dict:
+        data = await self._request("GET", "integration/dashboard")
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("camaras"), list)
+            or not isinstance(data.get("ubicaciones"), list)
+        ):
+            raise IncompatibleApi("Actualiza el servidor: falta el contrato de controles")
+        for camera in data["camaras"]:
+            if not isinstance(camera, dict) or not all(
+                key in camera
+                for key in (
+                    "ubicacionId",
+                    "nombre",
+                    "consigna",
+                    "pendiente",
+                    "origen",
+                    "lotes",
+                    "manualHasta",
+                )
+            ):
+                raise IncompatibleApi("Respuesta de cámara incompatible")
+        return data
+
+    async def async_operation(self, operation: str, data: dict) -> dict:
+        location = quote(str(data.get("location_id", "")), safe="")
+        lot = quote(str(data.get("lot_id", "")), safe="")
+        match operation:
+            case "lots":
+                query = urlencode(
+                    {
+                        "offset": data.get("offset", 0),
+                        "limit": 100,
+                        "buscar": data.get("search", ""),
+                    }
+                )
+                return await self._request("GET", f"lotes?{query}")
+            case "movement_options":
+                query = urlencode({"fecha": data.get("date", "")})
+                return await self._request("GET", f"lotes/{lot}/opciones-movimiento?{query}")
+            case "create_lot":
+                return await self._request("POST", "lotes", data.get("payload", {}))
+            case "register_movement":
+                return await self._request(
+                    "POST", f"lotes/{lot}/movimientos", data.get("payload", {})
+                )
+            case "set_manual":
+                return await self._request(
+                    "POST", f"ubicaciones/{location}/consignas", data.get("payload", {})
+                )
+            case "confirm_change":
+                return await self._request(
+                    "POST",
+                    f"ubicaciones/{location}/confirmacion",
+                    {"propuestaId": data.get("proposal_id")},
+                )
+            case _:
+                raise RequestError("Operación no disponible")

@@ -7,6 +7,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
+from .entity import CameraEntity, add_cameras
 
 PARALLEL_UPDATES = 0
 
@@ -17,6 +18,21 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     async_add_entities([ConnectionSensor(entry.runtime_data)])
+    add_cameras(
+        entry,
+        async_add_entities,
+        lambda camera: [PendingSensor(entry.runtime_data, camera, "pending", "Cambio pendiente")],
+    )
+
+
+class PendingSensor(CameraEntity, BinarySensorEntity):
+    @property
+    def is_on(self):
+        return bool((self.camera or {}).get("pendiente"))
+
+    @property
+    def extra_state_attributes(self):
+        return {**super().extra_state_attributes, "pending": (self.camera or {}).get("pendiente")}
 
 
 class ConnectionSensor(CoordinatorEntity[RegistrosCoordinator], BinarySensorEntity):

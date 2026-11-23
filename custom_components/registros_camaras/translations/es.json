@@ -41,5 +41,14 @@
       "unique_id_mismatch": "La conexión corresponde a otra cuenta de la aplicación."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Notificaciones de cambios pendientes",
+        "description": "Selecciona un servicio mobile_app para notificaciones accionables, o un aviso dentro de Home Assistant. La API valida cada confirmación.",
+        "data": { "notify_service": "Servicio de notificación" }
+      }
+    }
+  },
   "entity": { "binary_sensor": { "connection": { "name": "Conexión" } } }
 }

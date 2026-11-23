@@ -1,0 +1,68 @@
+create_lot:
+  name: Crear lote
+  description: Crea un lote mediante la API, incluida su entrada inicial según las reglas del servidor.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    payload:
+      required: true
+      description: "Objeto API: codigo, cantidad, iniciadoEn (ISO con zona), zonaHoraria."
+      selector:
+        object:
+register_movement:
+  name: Registrar movimiento
+  description: Registra un traslado completo o reparto con fecha y procedencias.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    lot_id:
+      required: true
+      selector:
+        text:
+    payload:
+      required: true
+      description: "Objeto API: id UUID, revision del lote, fecha, ubicacionOrigenId, destinos y mezclarOrigen opcional."
+      selector:
+        object:
+set_manual:
+  name: Establecer consigna manual
+  description: Crea una excepción temporal con fin obligatorio, validada por la API.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    location_id:
+      required: true
+      selector:
+        text:
+    payload:
+      required: true
+      description: "Objeto API: id UUID, revision 0, zonaHoraria, vigenteDesde, vigenteHasta, temperaturaMin, temperaturaMax, humedadMin, humedadMax y motivo opcional."
+      selector:
+        object:
+confirm_change:
+  name: Confirmar propuesta automática
+  description: Confirma exclusivamente el identificador de propuesta revisado. Rechaza propuestas obsoletas.
+  fields:
+    entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: registros_camaras
+    location_id:
+      required: true
+      selector:
+        text:
+    proposal_id:
+      required: true
+      description: Identificador del atributo pending.id del indicador de cambio pendiente.
+      selector:
+        text:
