@@ -39,7 +39,11 @@ class CameraEntity(CoordinatorEntity[RegistrosCoordinator]):
 
     @property
     def extra_state_attributes(self):
-        return {"location_id": self.location_id, "entry_id": self.coordinator.config_entry.entry_id}
+        return {
+            "location_id": self.location_id,
+            "entry_id": self.coordinator.config_entry.entry_id,
+            "active_lots": len((self.camera or {}).get("lotes", [])),
+        }
 
 
 def add_cameras(entry, async_add_entities, factory):

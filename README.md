@@ -27,6 +27,10 @@ Los campos se muestran en la interfaz de acciones de HA y se pueden usar en auto
 Los controles interactivos requieren un administrador de HA; las automatizaciones locales
 también pueden llamar a las acciones. Todas las operaciones se validan en la API.
 
+Las entidades de cámara exponen `active_lots`: número de lotes con existencias actuales
+según la API. Los indicadores ambientales del panel pueden limitarse a cámaras ocupadas
+y comparar cada lectura con sus límites de consigna vigente, incluidos los manuales.
+
 Para los formularios visuales instala un único complemento adicional de HACS:
 [Registros Cámaras — Tarjetas](https://github.com/Siroguh/registros_camaras_cards).
 Incluye tres tarjetas independientes y editores visuales, sin copiar archivos ni escribir YAML.
