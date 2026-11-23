@@ -1,5 +1,10 @@
 # Registros Cámaras para Home Assistant
 
+Esta integración pertenece al proyecto **[Siroguh/registros_camaras](https://github.com/Siroguh/registros_camaras)**,
+su repositorio padre y servidor API. El código fuente, las incidencias y las releases
+de la integración se mantienen exclusivamente en este repositorio independiente:
+**[Siroguh/registros_camaras_home_assistant](https://github.com/Siroguh/registros_camaras_home_assistant)**.
+
 Cliente de la API REST de **Registros Cámaras**, instalable como integración personalizada
 de HACS. Requiere Home Assistant **2026.10 o posterior** y el servidor de Registros Cámaras
 con controles operativos y confirmaciones compartidas (migración `0018`).
@@ -21,13 +26,13 @@ Los controles interactivos requieren un administrador de HA; las automatizacione
 también pueden llamar a las acciones. Todas las operaciones se validan en la API.
 
 Para los formularios visuales instala un único complemento adicional de HACS:
-[Registros Cámaras — Tarjetas](https://github.com/Siroguh/registros-camaras-cards).
+[Registros Cámaras — Tarjetas](https://github.com/Siroguh/registros_camaras_cards).
 Incluye tres tarjetas independientes y editores visuales, sin copiar archivos ni escribir YAML.
 
 ## Instalar con HACS
 
 1. En **HACS → menú de tres puntos → Repositorios personalizados**, añade:
-   `https://github.com/Siroguh/ha-registros-camaras`.
+   `https://github.com/Siroguh/registros_camaras_home_assistant`.
 2. Selecciona el tipo **Integración**.
 3. Busca **Registros Cámaras** en HACS e instálala.
 4. Reinicia Home Assistant.
@@ -125,20 +130,15 @@ API. El puente tiene una lista cerrada de operaciones y no expone la clave ni ac
 
 ## Código fuente y publicación
 
-La fuente se mantiene en `apps/home-assistant` del proyecto
-[registros_camaras](https://github.com/Siroguh/registros_camaras).
-Este repositorio es su distribución independiente para HACS. No contiene el servidor,
-la base de datos, claves ni configuración local del proyecto.
+Este repositorio es la única fuente de la integración y su distribución para HACS.
+Se desarrolla directamente en `custom_components/registros_camaras`; no se exporta
+desde el repositorio padre. El servidor y sus reglas de negocio pertenecen a
+[registros_camaras](https://github.com/Siroguh/registros_camaras), y las tarjetas a
+[registros_camaras_cards](https://github.com/Siroguh/registros_camaras_cards).
+No contiene la base de datos, claves ni configuración local del proyecto.
 
-Desde el monorepo se exporta con:
-
-```bash
-pnpm ha:export /ruta/a/un/directorio-nuevo
-```
-
-El exportador usa una lista explícita de archivos y exige un destino nuevo. Para publicar
-una actualización, aplica el contenido exportado en el repositorio de distribución,
-revisa el diff y publica una release cuyo tag coincida con `manifest.json`.
+Para publicar una actualización, revisa el diff, actualiza la versión de
+`custom_components/registros_camaras/manifest.json` y publica una release con el mismo tag.
 
 Comprobaciones estáticas desde este directorio:
 
