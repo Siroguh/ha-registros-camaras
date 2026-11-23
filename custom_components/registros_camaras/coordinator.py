@@ -38,7 +38,8 @@ class RegistrosCoordinator(DataUpdateCoordinator[IntegrationStatus]):
             self.config_entry.async_start_reauth(self.hass)
             raise ConfigEntryAuthFailed("La clave no es válida o ha sido revocada") from err
         if operation not in {"lots", "movement_options", "movements", "manuals"}:
-            await self.async_request_refresh()
+            # Writes must be visible immediately, even inside the debouncer cooldown.
+            await self.async_refresh()
         return result
 
     async def _async_update_data(self) -> IntegrationStatus:

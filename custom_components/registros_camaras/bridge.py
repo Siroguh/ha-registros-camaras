@@ -69,7 +69,7 @@ async def operation(hass, connection, msg):
     try:
         runtime = coordinator(hass, msg["entry_id"])
         if msg["operation"] == "snapshot":
-            await runtime.async_request_refresh()
+            await runtime.async_refresh()
             if not runtime.last_update_success:
                 raise HomeAssistantError(
                     "La API no está disponible. Revisa la conexión de la integración."
