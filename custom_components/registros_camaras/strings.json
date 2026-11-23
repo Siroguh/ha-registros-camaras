@@ -1,0 +1,42 @@
+{
+  "title": "Registros Cámaras",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Registros Cámaras",
+        "description": "Create an integration key in the application's Home Assistant page. This is a client of that application's API.",
+        "data": { "url": "Application URL", "api_key": "Integration key" },
+        "data_description": {
+          "url": "The application origin, including http:// or https:// and its port, without /api or a page path. It must be reachable from Home Assistant.",
+          "api_key": "The rc_ key issued by this application, not a Home Assistant access token."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Replace integration key",
+        "description": "Create a new key in the application using the same account.",
+        "data": { "api_key": "New integration key" },
+        "data_description": { "api_key": "The new rc_ key issued by this application." }
+      },
+      "reconfigure": {
+        "title": "Change connection",
+        "description": "Connect to the same application account using a new address or key.",
+        "data": { "url": "Application URL", "api_key": "New integration key (optional)" },
+        "data_description": {
+          "url": "Application origin reachable from Home Assistant, without a page path.",
+          "api_key": "Leave empty to keep the existing key."
+        }
+      }
+    },
+    "error": {
+      "invalid_url": "Enter an HTTP or HTTPS origin without a path, query or embedded credentials.",
+      "invalid_auth": "The integration key is invalid, revoked or unauthorized.",
+      "cannot_connect": "Cannot reach the application. Check its address, certificate and network access from Home Assistant.",
+      "incompatible_api": "This server does not support the required Registros Cámaras API."
+    },
+    "abort": {
+      "already_configured": "This application account is already configured.",
+      "unique_id_mismatch": "The connection belongs to a different application account."
+    }
+  },
+  "entity": { "binary_sensor": { "connection": { "name": "Connection" } } }
+}

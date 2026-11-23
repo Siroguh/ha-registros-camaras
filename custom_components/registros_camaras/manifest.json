@@ -1,0 +1,12 @@
+{
+  "domain": "registros_camaras",
+  "name": "Registros Cámaras",
+  "codeowners": ["@Siroguh"],
+  "config_flow": true,
+  "documentation": "https://github.com/Siroguh/ha-registros-camaras",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Siroguh/ha-registros-camaras/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
