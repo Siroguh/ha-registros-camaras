@@ -1,0 +1,29 @@
+repos:
+  - repo: local
+    hooks:
+      - id: secrets
+        name: Gitleaks staged changes
+        entry: sh scripts/secrets.sh --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: ruff-check
+        name: Ruff lint
+        entry: uv run --locked ruff check --fix
+        language: system
+        types: [python]
+        stages: [pre-commit]
+      - id: ruff-format
+        name: Ruff format
+        entry: uv run --locked ruff format
+        language: system
+        types: [python]
+        stages: [pre-commit]
+      - id: check
+        name: Static checks and integration package
+        entry: sh scripts/check.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
