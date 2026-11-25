@@ -156,13 +156,13 @@ Para publicar una actualización, revisa el diff, actualiza la versión de
 Comprobaciones estáticas desde este directorio:
 
 ```bash
-uvx ruff check .
-uvx ruff format --check .
-python3 -m compileall -q custom_components package.py
-python3 package.py
+sh scripts/setup-hooks.sh
+sh scripts/check.sh
 ```
 
 El último comando genera `dist/registros_camaras.zip` para instalación manual.
+La instalación configura Ruff, pre-commit y Gitleaks con versiones fijadas.
+Consulta [CI, hooks y Pullfrog](.github/README.md) para el flujo de PRs.
 HACS instala desde los archivos del repositorio correspondientes a la release.
 La CI ejecuta comprobaciones estáticas Python, Hassfest y HACS; no ejecuta tests.
 
