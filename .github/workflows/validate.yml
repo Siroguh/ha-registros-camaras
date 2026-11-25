@@ -3,7 +3,7 @@ name: Validate
 on:
   push:
     branches: [main]
-    tags: ["*"]
+    tags: ["**"]
   pull_request:
   workflow_dispatch:
 
@@ -31,7 +31,7 @@ jobs:
           version: "0.13.9"
       - run: uv sync --locked
       - run: sh scripts/setup-gitleaks.sh
-      - run: sh scripts/secrets.sh
+      - run: sh scripts/secrets.sh --log-opts='--full-history --diff-merges=first-parent --diff-filter=tuxdb HEAD'
       - run: sh scripts/check.sh
   hassfest:
     runs-on: ubuntu-latest

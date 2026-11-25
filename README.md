@@ -162,7 +162,7 @@ sh scripts/check.sh
 
 El último comando genera `dist/registros_camaras.zip` para instalación manual.
 La instalación configura Ruff, pre-commit y Gitleaks con versiones fijadas.
-Consulta [CI, hooks y Pullfrog](.github/README.md) para el flujo de PRs.
+Consulta [CI, hooks y Pullfrog](.github/ci.md) para el flujo de PRs.
 HACS instala desde los archivos del repositorio correspondientes a la release.
 La CI ejecuta comprobaciones estáticas Python, Hassfest y HACS; no ejecuta tests.
 

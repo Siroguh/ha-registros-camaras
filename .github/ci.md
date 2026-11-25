@@ -19,7 +19,8 @@ sha256sum. El entorno `.venv/` y los binarios `.local/` no se versionan.
   Python preparados. pre-commit aparta los cambios sin preparar durante el hook.
   Si Ruff modifica archivos, revísalos, prepáralos y repite el commit.
 - Pre-push: lint, formato, compilación sintáctica y generación del ZIP.
-- CI: instalación bloqueada por `uv.lock`, escaneo del historial completo,
+- CI: instalación bloqueada por `uv.lock`, escaneo de la ascendencia completa
+  de `HEAD` (incluidos los cambios de merges),
   comprobaciones estáticas, Hassfest y HACS en PR, `main`, tags y manualmente.
 
 `sh scripts/check.sh` genera `dist/registros_camaras.zip`. La validación HACS no
