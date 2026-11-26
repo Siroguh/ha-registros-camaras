@@ -103,6 +103,9 @@ class NotificationRelay:
             "maintenance": "No se pudo actualizar la cola de respuestas. "
             "Se conserva el UUID original "
             "para reintento automático; no vuelvas a pulsar la respuesta.",
+            "scope": "No se pudo guardar la identidad verificada del servidor. "
+            "No se capturan acciones de ese nuevo ámbito hasta guardar la identidad. "
+            "Se reintentará automáticamente; mientras tanto responde desde la aplicación.",
             "remove": f"No se pudo eliminar la cola local {self.path.name}. "
             "El relay está detenido; elimina el archivo al resolver el error de almacenamiento.",
         }
@@ -171,6 +174,7 @@ class NotificationRelay:
         client = RegistrosClient(
             async_get_clientsession(self.hass), credentials[CONF_URL], credentials[CONF_API_KEY]
         )
+        storage_phase = "scope"
         try:
             # Every pass authenticates the current endpoint; cached routing identity
             # permits offline intake, never delivery to an unverified replacement.
@@ -190,6 +194,7 @@ class NotificationRelay:
                     if item["scope"] == status.notification_scope:
                         heads.setdefault(item["occurrence"], item)
                 items = list(heads.values())
+            storage_phase = "maintenance"
             if not items:
                 return
             start = self.cursor % len(items)
@@ -204,7 +209,8 @@ class NotificationRelay:
                         self.hass,
                         "Respuesta descartada localmente: "
                         "el usuario ya no es un administrador activo. "
-                        "No se ha enviado al servidor.",
+                        "No habrá más intentos de esta respuesta. "
+                        "Comprueba en la aplicación si un intento anterior fue aceptado.",
                         title="Respuesta no autorizada",
                         notification_id=f"{DOMAIN}_response_{item['id']}",
                     )
@@ -239,7 +245,7 @@ class NotificationRelay:
         except ApiError:
             return
         except OSError, ValueError, WriteError:
-            self.storage_error("maintenance")
+            self.storage_error(storage_phase)
 
     async def remove(self):
         """Permanent deletion only: stop scheduling, drain writes, then remove disk state."""
@@ -282,7 +288,9 @@ async def async_setup_notifications(hass, entry=None):
         if current.entry_id not in relays:
             relays[current.entry_id] = NotificationRelay(hass, current)
     for current in entries:
-        relay = relays[current.entry_id]
+        relay = relays.get(current.entry_id)
+        if relay is None:
+            continue
         try:
             await relay.initialize()
         except OSError, ValueError, WriteError:
