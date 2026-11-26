@@ -47,6 +47,7 @@ class IntegrationStatus:
     account_id: str
     api_version: int
     capabilities: tuple[str, ...]
+    notification_scope: str | None = None
 
 
 class RegistrosClient:
@@ -109,6 +110,14 @@ class RegistrosClient:
             account_id=data["accountId"],
             api_version=data["apiVersion"],
             capabilities=tuple(data["capabilities"]),
+            notification_scope=data.get("notificationScope"),
+        )
+
+    async def async_notification_action(self, occurrence: str, action_id: str, action: str) -> dict:
+        return await self._request(
+            "POST",
+            f"notifications/{quote(occurrence, safe='')}/actions",
+            {"id": action_id, "action": action},
         )
 
     async def async_dashboard(self) -> dict:

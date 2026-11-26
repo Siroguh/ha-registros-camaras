@@ -1,111 +1,93 @@
+"""Persist and relay notification responses; the application owns all rules and sends."""
+
+import asyncio
+from datetime import timedelta
 import logging
+import re
+from uuid import uuid4
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 
-from .api import ApiError
+from .api import ApiError, AuthenticationError, RequestError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+_ACTION = re.compile(r"^rcn:([a-f0-9]{16}):([a-f0-9-]{36}):(acknowledge|confirm|reject)$")
 
 
-def async_setup_notifications(hass, entry):
-    service = entry.options.get("notify_service", "")
-    if not service:
-        return
-    sent: dict[str, str] = {}
+async def async_setup_notifications(hass, entry):
+    storage = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.notification_actions")
+    saved = await storage.async_load() or {"pending": []}
+    pending = saved.get("pending", [])
+    lock = asyncio.Lock()
     running = False
 
-    async def notify():
+    async def flush():
         nonlocal running
-        if running or not entry.runtime_data.last_update_success:
+        if running:
             return
         running = True
         try:
-            for camera in entry.runtime_data.dashboard["camaras"]:
-                pending = camera["pendiente"]
-                location = camera["ubicacionId"]
-                tag = f"{DOMAIN}_{entry.entry_id}_{location}"
-                if not pending:
-                    if sent.pop(location, None) and service == "persistent_notification":
-                        persistent_notification.async_dismiss(hass, tag)
-                    continue
-                if sent.get(location) == pending["id"]:
-                    continue
-                target = pending["propuesta"]
-                values = (
-                    f"{target['temperaturaMin']}–{target['temperaturaMax']} °C / "
-                    f"{target['humedadMin']}–{target['humedadMax']} %"
-                    if target
-                    else "Retirar consigna automática"
-                )
-                message = f"{values}. {pending['motivo']}"
+            while True:
+                async with lock:
+                    if not pending:
+                        return
+                    await storage.async_save({"pending": pending})
+                    item = dict(pending[0])
                 try:
-                    if service == "persistent_notification":
-                        persistent_notification.async_create(
-                            hass,
-                            message + " Confirma desde la tarjeta o el botón de la cámara.",
-                            title=camera["nombre"],
-                            notification_id=tag,
-                        )
-                    else:
-                        await hass.services.async_call(
-                            "notify",
-                            service,
-                            {
-                                "title": camera["nombre"],
-                                "message": message,
-                                "data": {
-                                    "tag": tag,
-                                    "actions": [
-                                        {
-                                            "action": f"rc:{entry.entry_id}:{pending['id']}",
-                                            "title": "Confirmar esta propuesta",
-                                        }
-                                    ],
-                                },
-                            },
-                            blocking=True,
-                        )
-                    sent[location] = pending["id"]
-                except HomeAssistantError:
-                    _LOGGER.warning("No se pudo entregar una notificación de consigna")
+                    await entry.runtime_data.client.async_notification_action(
+                        item["occurrence"], item["id"], item["action"]
+                    )
+                except AuthenticationError:
+                    entry.async_start_reauth(hass)
+                    return
+                except RequestError as err:
+                    persistent_notification.async_create(
+                        hass,
+                        str(err),
+                        title="Respuesta de notificación rechazada",
+                        notification_id=f"{DOMAIN}_response_{item['id']}",
+                    )
+                except ApiError:
+                    # Keep the same action UUID on disk until the server accepts
+                    # it or definitively rejects it (stale proposal, etc.).
+                    return
+                async with lock:
+                    pending[:] = [row for row in pending if row["id"] != item["id"]]
+                    await storage.async_save({"pending": pending})
         finally:
             running = False
 
     @callback
-    def updated():
-        entry.async_create_background_task(hass, notify(), "registros-notification")
+    def retry(_now=None):
+        entry.async_create_background_task(hass, flush(), "registros-notification-responses")
 
     async def action(event):
-        value = event.data.get("action", "")
-        prefix = f"rc:{entry.entry_id}:"
-        if not isinstance(value, str) or not value.startswith(prefix):
+        value = event.data.get("action")
+        match = _ACTION.fullmatch(value) if isinstance(value, str) else None
+        status = entry.runtime_data.data
+        if not match or not status or match[1] != status.notification_scope:
             return
-        proposal = value[len(prefix) :]
-        camera = next(
-            (
-                c
-                for c in entry.runtime_data.dashboard["camaras"]
-                if (c.get("pendiente") or {}).get("id") == proposal
-            ),
-            None,
-        )
+        item = {"id": str(uuid4()), "occurrence": match[2], "action": match[3]}
         try:
-            if not camera:
-                raise HomeAssistantError("Esta propuesta ya no está pendiente. Revisa la cámara.")
-            await entry.runtime_data.async_operation(
-                "confirm_change", {"location_id": camera["ubicacionId"], "proposal_id": proposal}
-            )
-        except (ApiError, HomeAssistantError) as err:
+            async with lock:
+                pending.append(item)
+                # Save before contacting the server, not a delayed storage write.
+                await storage.async_save({"pending": pending})
+        except OSError, ValueError:
+            _LOGGER.exception("No se pudo persistir una respuesta de notificación")
             persistent_notification.async_create(
                 hass,
-                str(err),
-                title="No se confirmó el cambio",
-                notification_id=f"{DOMAIN}_confirmation_error_{entry.entry_id}",
+                "No se pudo guardar la respuesta. Reintenta o responde desde la aplicación.",
+                title="Respuesta no guardada",
+                notification_id=f"{DOMAIN}_response_storage",
             )
+            return
+        retry()
 
     entry.async_on_unload(hass.bus.async_listen("mobile_app_notification_action", action))
-    entry.async_on_unload(entry.runtime_data.async_add_listener(updated))
-    updated()
+    entry.async_on_unload(async_track_time_interval(hass, retry, timedelta(seconds=30)))
+    retry()

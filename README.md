@@ -128,15 +128,21 @@ es retirar la automática y también requiere confirmación. No se envían órde
 La propuesta tiene un UUID propio. Tarjeta, botón, notificación y web confirman mediante
 `POST /api/v1/ubicaciones/:id/confirmacion` con `{ "propuestaId": "..." }`. El servidor
 recalcula dentro de una transacción y rechaza propuestas obsoletas con HTTP 409.
-Las propuestas se detectan en las consultas (HA sondea cada 60 segundos).
+El servidor también detecta propuestas y vencimientos en segundo plano, sin depender del
+sondeo de HA. Las reglas y destinos se configuran en **Notificaciones** de la aplicación
+principal; Restate ejecuta los avisos y reintentos durables. El servidor llama directamente
+a los servicios `notify` de HA o a `persistent_notification.create` usando su conexión HA.
+La antigua opción local `notify_service` ya no se utiliza. Antes de actualizar esta
+integración, despliega el servidor con Restate y crea las reglas de propuesta que necesites.
 
-En **Ajustes → Dispositivos y servicios → Registros Cámaras → Configurar** puedes elegir
-un servicio `notify.mobile_app_…` para notificaciones accionables o avisos persistentes
-dentro de HA. Por defecto están desactivadas. Las notificaciones móviles incluyen
-**Confirmar esta propuesta**; los avisos persistentes remiten al botón o tarjeta.
-Una propuesta se notifica una vez mientras permanece pendiente durante esa carga de la
-integración; reiniciar o recargar HA puede volver a notificarla. Una notificación antigua
-nunca confirma silenciosamente una propuesta nueva.
+Esta integración solo reenvía las acciones móviles `rcn:<servidor>:<notificación>:<acción>`
+a `POST /api/v1/notifications/:id/actions`. Guarda cada respuesta en HA Storage **antes**
+de enviarla, conserva su UUID durante los reintentos y reanuda la cola tras reiniciar HA.
+Reintenta cada 30 segundos; una clave revocada inicia reautenticación sin perder la cola.
+El servidor decide permisos, vigencia de la propuesta y deduplicación. Un rechazo definitivo
+se muestra como notificación persistente. Los avisos persistentes sin botones se responden
+desde la web. Acusar recibo no recupera una alarma; no confirmar no modifica una consigna.
+Aceptar un envío en HA tampoco demuestra su entrega o lectura en un teléfono.
 
 Las tarjetas hablan con el puente WebSocket de la integración, no directamente con la
 API. El puente tiene una lista cerrada de operaciones y no expone la clave ni acepta URLs.
