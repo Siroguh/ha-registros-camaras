@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -47,6 +48,7 @@ class IntegrationStatus:
     account_id: str
     api_version: int
     capabilities: tuple[str, ...]
+    notification_scope: str | None = None
 
 
 class RegistrosClient:
@@ -102,6 +104,13 @@ class RegistrosClient:
             or not isinstance(data.get("capabilities"), list)
             or not all(isinstance(item, str) for item in data["capabilities"])
             or "connection:read" not in data["capabilities"]
+            or (
+                data.get("notificationScope") is not None
+                and (
+                    not isinstance(data["notificationScope"], str)
+                    or not re.fullmatch(r"[a-f0-9]{16}", data["notificationScope"])
+                )
+            )
         ):
             raise IncompatibleApi("Unsupported application API contract")
         return IntegrationStatus(
@@ -109,6 +118,14 @@ class RegistrosClient:
             account_id=data["accountId"],
             api_version=data["apiVersion"],
             capabilities=tuple(data["capabilities"]),
+            notification_scope=data.get("notificationScope"),
+        )
+
+    async def async_notification_action(self, occurrence: str, action_id: str, action: str) -> dict:
+        return await self._request(
+            "POST",
+            f"notifications/{quote(occurrence, safe='')}/actions",
+            {"id": action_id, "action": action},
         )
 
     async def async_dashboard(self) -> dict:

@@ -128,15 +128,43 @@ es retirar la automática y también requiere confirmación. No se envían órde
 La propuesta tiene un UUID propio. Tarjeta, botón, notificación y web confirman mediante
 `POST /api/v1/ubicaciones/:id/confirmacion` con `{ "propuestaId": "..." }`. El servidor
 recalcula dentro de una transacción y rechaza propuestas obsoletas con HTTP 409.
-Las propuestas se detectan en las consultas (HA sondea cada 60 segundos).
+El servidor también detecta propuestas y vencimientos en segundo plano, sin depender del
+sondeo de HA. Las reglas y destinos se configuran en **Notificaciones** de la aplicación
+principal; Restate ejecuta los avisos y reintentos durables. El servidor llama directamente
+a los servicios `notify` de HA o a `persistent_notification.create` usando su conexión HA.
+La antigua opción local `notify_service` ya no se utiliza. Antes de actualizar esta
+integración, despliega el servidor con Restate y crea las reglas de propuesta que necesites.
 
-En **Ajustes → Dispositivos y servicios → Registros Cámaras → Configurar** puedes elegir
-un servicio `notify.mobile_app_…` para notificaciones accionables o avisos persistentes
-dentro de HA. Por defecto están desactivadas. Las notificaciones móviles incluyen
-**Confirmar esta propuesta**; los avisos persistentes remiten al botón o tarjeta.
-Una propuesta se notifica una vez mientras permanece pendiente durante esa carga de la
-integración; reiniciar o recargar HA puede volver a notificarla. Una notificación antigua
-nunca confirma silenciosamente una propuesta nueva.
+Esta integración solo reenvía las acciones móviles `rcn:<servidor>:<notificación>:<acción>`
+a `POST /api/v1/notifications/:id/actions`. Solo admite administradores activos de HA,
+comprobados mediante el contexto autenticado del evento móvil y de nuevo antes del envío.
+Guarda cada respuesta en `.storage/registros_camaras.<entry_id>.notification_relay`
+con escritura atómica y `fsync` **antes** de enviarla; los fallos de escritura se propagan
+y no dejan una respuesta sin guardar disponible para el envío. Conserva el UUID durante
+los reintentos y reanuda la cola tras reiniciar HA.
+
+La captura se registra antes de conectar con la API y usa la última identidad verificada
+guardada en disco, incluso mientras la entrada espera conexión o reautenticación.
+Un único propietario de la cola vive durante toda la ejecución de HA, también durante
+recargas, para evitar escrituras de instantáneas desactualizadas. Cada respuesta conserva
+su ámbito de servidor: solo se envía si una consulta autenticada reciente anuncia ese mismo
+ámbito y cuenta. Si cambia el servidor o deja de anunciarlo, las respuestas anteriores se
+conservan sin enviarlas. Una clave revocada inicia reautenticación sin perder la cola.
+
+Reintenta cada 30 segundos con hasta 50 notificaciones independientes por pasada y turno
+rotativo; un fallo transitorio no bloquea respuestas de otras notificaciones. Las respuestas
+de una misma notificación conservan su orden. Incluye el archivo de cola en las copias de HA.
+Si un usuario pierde permisos, su respuesta se descarta localmente con un aviso persistente
+y deja pasar la siguiente respuesta de esa notificación. Si una cola no puede leerse,
+se conserva intacta y se bloquea solo ese relay; los controles y las otras entradas siguen
+funcionando. Tras restaurar la copia, recarga la entrada. Un fallo al retirar una respuesta
+ya enviada conserva su UUID para reintento automático y no pide volver a pulsar.
+Eliminar permanentemente la entrada detiene el relay, espera las escrituras pendientes
+y elimina su archivo local; recargar o reautenticar conserva la cola.
+El servidor decide permisos, vigencia de la propuesta y deduplicación. Un rechazo definitivo
+se muestra como notificación persistente. Los avisos persistentes sin botones se responden
+desde la web. Acusar recibo no recupera una alarma; no confirmar no modifica una consigna.
+Aceptar un envío en HA tampoco demuestra su entrega o lectura en un teléfono.
 
 Las tarjetas hablan con el puente WebSocket de la integración, no directamente con la
 API. El puente tiene una lista cerrada de operaciones y no expone la clave ni acepta URLs.
