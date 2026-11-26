@@ -15,10 +15,12 @@ PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.BUTTON]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     await async_register(hass)
+    await async_setup_notifications(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
+    await async_setup_notifications(hass, entry)
     client = RegistrosClient(
         async_get_clientsession(hass), entry.data[CONF_URL], entry.data[CONF_API_KEY]
     )
@@ -26,7 +28,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) ->
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(async_reload))
-    await async_setup_notifications(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

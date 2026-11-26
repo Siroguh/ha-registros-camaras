@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -103,6 +104,13 @@ class RegistrosClient:
             or not isinstance(data.get("capabilities"), list)
             or not all(isinstance(item, str) for item in data["capabilities"])
             or "connection:read" not in data["capabilities"]
+            or (
+                data.get("notificationScope") is not None
+                and (
+                    not isinstance(data["notificationScope"], str)
+                    or not re.fullmatch(r"[a-f0-9]{16}", data["notificationScope"])
+                )
+            )
         ):
             raise IncompatibleApi("Unsupported application API contract")
         return IntegrationStatus(

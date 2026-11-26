@@ -136,9 +136,24 @@ La antigua opción local `notify_service` ya no se utiliza. Antes de actualizar 
 integración, despliega el servidor con Restate y crea las reglas de propuesta que necesites.
 
 Esta integración solo reenvía las acciones móviles `rcn:<servidor>:<notificación>:<acción>`
-a `POST /api/v1/notifications/:id/actions`. Guarda cada respuesta en HA Storage **antes**
-de enviarla, conserva su UUID durante los reintentos y reanuda la cola tras reiniciar HA.
-Reintenta cada 30 segundos; una clave revocada inicia reautenticación sin perder la cola.
+a `POST /api/v1/notifications/:id/actions`. Solo admite administradores activos de HA,
+comprobados mediante el contexto autenticado del evento móvil y de nuevo antes del envío.
+Guarda cada respuesta en `.storage/registros_camaras.<entry_id>.notification_relay`
+con escritura atómica y `fsync` **antes** de enviarla; los fallos de escritura se propagan
+y no dejan una respuesta sin guardar disponible para el envío. Conserva el UUID durante
+los reintentos y reanuda la cola tras reiniciar HA.
+
+La captura se registra antes de conectar con la API y usa la última identidad verificada
+guardada en disco, incluso mientras la entrada espera conexión o reautenticación.
+Un único propietario de la cola vive durante toda la ejecución de HA, también durante
+recargas, para evitar escrituras de instantáneas desactualizadas. Cada respuesta conserva
+su ámbito de servidor: solo se envía si una consulta autenticada reciente anuncia ese mismo
+ámbito y cuenta. Si cambia el servidor o deja de anunciarlo, las respuestas anteriores se
+conservan sin enviarlas. Una clave revocada inicia reautenticación sin perder la cola.
+
+Reintenta cada 30 segundos con hasta 50 notificaciones independientes por pasada y turno
+rotativo; un fallo transitorio no bloquea respuestas de otras notificaciones. Las respuestas
+de una misma notificación conservan su orden. Incluye el archivo de cola en las copias de HA.
 El servidor decide permisos, vigencia de la propuesta y deduplicación. Un rechazo definitivo
 se muestra como notificación persistente. Los avisos persistentes sin botones se responden
 desde la web. Acusar recibo no recupera una alarma; no confirmar no modifica una consigna.
