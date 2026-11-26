@@ -39,6 +39,7 @@ class NotificationRelay:
         self.pending = []
         self.task = None
         self.cursor = 0
+        self.removed = False
 
     def _load(self):
         try:
@@ -48,7 +49,7 @@ class NotificationRelay:
 
     async def initialize(self):
         async with self.lock:
-            if self.loaded:
+            if self.loaded or self.removed:
                 return
             saved = await self.hass.async_add_executor_job(self._load)
             if (
@@ -71,7 +72,7 @@ class NotificationRelay:
                     for key in ("id", "scope", "occurrence", "action", "user_id")
                 ):
                     raise ValueError("Invalid notification response; restore its backup")
-            self.scope = saved["scope"]
+            self.scope = saved.get("scope")
             self.pending = saved["pending"]
             self.loaded = True
 
@@ -82,6 +83,8 @@ class NotificationRelay:
 
     async def save(self, pending, scope):
         # Always called under the sole owner's lock. Memory changes only after commit.
+        if self.removed:
+            return
         await self.hass.async_add_executor_job(
             self._write,
             {"version": 1, "account_id": self.account_id, "scope": scope, "pending": pending},
@@ -89,16 +92,30 @@ class NotificationRelay:
         self.pending = pending
         self.scope = scope
 
-    def storage_error(self):
+    def storage_error(self, phase="enqueue"):
         _LOGGER.exception("No se pudo persistir una respuesta de notificación")
+        messages = {
+            "enqueue": "No se pudo guardar la respuesta. Reintenta o responde desde la aplicación.",
+            "load": f"No se pudo leer la cola de respuestas de esta entrada: {self.path.name}. "
+            "Se conserva el archivo y se detiene solo este relay. "
+            "Restaura su copia y recarga la entrada. "
+            "Los controles de cámara siguen disponibles.",
+            "maintenance": "No se pudo actualizar la cola de respuestas. "
+            "Se conserva el UUID original "
+            "para reintento automático; no vuelvas a pulsar la respuesta.",
+            "remove": f"No se pudo eliminar la cola local {self.path.name}. "
+            "El relay está detenido; elimina el archivo al resolver el error de almacenamiento.",
+        }
         persistent_notification.async_create(
             self.hass,
-            "No se pudo guardar la respuesta. Reintenta o responde desde la aplicación.",
-            title="Respuesta no guardada",
+            messages[phase],
+            title="Almacenamiento de respuestas",
             notification_id=f"{DOMAIN}_{self.entry_id}_response_storage",
         )
 
     def entry(self):
+        if self.removed:
+            return None
         entry = self.hass.config_entries.async_get_entry(self.entry_id)
         return entry if entry and entry.disabled_by is None else None
 
@@ -110,7 +127,7 @@ class NotificationRelay:
         try:
             await self.initialize()
         except OSError, ValueError, WriteError:
-            self.storage_error()
+            self.storage_error("load")
             return
         if match[1] != self.scope:
             return
@@ -141,7 +158,7 @@ class NotificationRelay:
 
     @callback
     def retry(self, _now=None):
-        if self.loaded and (self.task is None or self.task.done()):
+        if self.loaded and self.entry() and (self.task is None or self.task.done()):
             self.task = self.hass.async_create_background_task(
                 self.flush(), f"{DOMAIN} notification responses {self.entry_id}"
             )
@@ -183,6 +200,18 @@ class NotificationRelay:
                     return
                 user = await self.hass.auth.async_get_user(item["user_id"])
                 if not user or not user.is_active or not user.is_admin:
+                    persistent_notification.async_create(
+                        self.hass,
+                        "Respuesta descartada localmente: "
+                        "el usuario ya no es un administrador activo. "
+                        "No se ha enviado al servidor.",
+                        title="Respuesta no autorizada",
+                        notification_id=f"{DOMAIN}_response_{item['id']}",
+                    )
+                    async with self.lock:
+                        await self.save(
+                            [row for row in self.pending if row["id"] != item["id"]], self.scope
+                        )
                     continue
                 try:
                     await client.async_notification_action(
@@ -210,7 +239,21 @@ class NotificationRelay:
         except ApiError:
             return
         except OSError, ValueError, WriteError:
-            self.storage_error()
+            self.storage_error("maintenance")
+
+    async def remove(self):
+        """Permanent deletion only: stop scheduling, drain writes, then remove disk state."""
+        self.removed = True
+        if self.task and not self.task.done():
+            await asyncio.gather(self.task, return_exceptions=True)
+        async with self.lock:
+            try:
+                await self.hass.async_add_executor_job(self._remove_file)
+            except OSError:
+                self.storage_error("remove")
+
+    def _remove_file(self):
+        self.path.unlink(missing_ok=True)
 
 
 async def async_setup_notifications(hass, entry=None):
@@ -230,11 +273,26 @@ async def async_setup_notifications(hass, entry=None):
         hass.bus.async_listen("mobile_app_notification_action", action)
         async_track_time_interval(hass, retry, timedelta(seconds=30))
     relays = hass.data[_RELAYS]
-    entries = [entry] if entry else hass.config_entries.async_entries(DOMAIN)
+    entries = [
+        current
+        for current in ([entry] if entry else hass.config_entries.async_entries(DOMAIN))
+        if current.disabled_by is None
+    ]
     for current in entries:
         if current.entry_id not in relays:
             relays[current.entry_id] = NotificationRelay(hass, current)
     for current in entries:
         relay = relays[current.entry_id]
-        await relay.initialize()
+        try:
+            await relay.initialize()
+        except OSError, ValueError, WriteError:
+            relay.storage_error("load")
+            continue
         relay.retry()
+
+
+async def async_remove_notifications(hass, entry):
+    relay = hass.data.get(_RELAYS, {}).pop(entry.entry_id, None)
+    if relay is None:
+        relay = NotificationRelay(hass, entry)
+    await relay.remove()

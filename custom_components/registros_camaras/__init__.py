@@ -7,7 +7,7 @@ from .api import RegistrosClient
 from .bridge import async_register
 from .const import DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
-from .notifications import async_setup_notifications
+from .notifications import async_remove_notifications, async_setup_notifications
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.BUTTON]
@@ -34,6 +34,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) ->
 
 async def async_unload_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> None:
+    await async_remove_notifications(hass, entry)
 
 
 async def async_reload(hass: HomeAssistant, entry: RegistrosConfigEntry) -> None:

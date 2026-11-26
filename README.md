@@ -154,6 +154,13 @@ conservan sin enviarlas. Una clave revocada inicia reautenticación sin perder l
 Reintenta cada 30 segundos con hasta 50 notificaciones independientes por pasada y turno
 rotativo; un fallo transitorio no bloquea respuestas de otras notificaciones. Las respuestas
 de una misma notificación conservan su orden. Incluye el archivo de cola en las copias de HA.
+Si un usuario pierde permisos, su respuesta se descarta localmente con un aviso persistente
+y deja pasar la siguiente respuesta de esa notificación. Si una cola no puede leerse,
+se conserva intacta y se bloquea solo ese relay; los controles y las otras entradas siguen
+funcionando. Tras restaurar la copia, recarga la entrada. Un fallo al retirar una respuesta
+ya enviada conserva su UUID para reintento automático y no pide volver a pulsar.
+Eliminar permanentemente la entrada detiene el relay, espera las escrituras pendientes
+y elimina su archivo local; recargar o reautenticar conserva la cola.
 El servidor decide permisos, vigencia de la propuesta y deduplicación. Un rechazo definitivo
 se muestra como notificación persistente. Los avisos persistentes sin botones se responden
 desde la web. Acusar recibo no recupera una alarma; no confirmar no modifica una consigna.
