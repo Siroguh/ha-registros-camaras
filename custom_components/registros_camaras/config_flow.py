@@ -60,11 +60,19 @@ class RegistrosConfigFlow(ConfigFlow, domain=DOMAIN):
             except ApiError:
                 errors["base"] = "cannot_connect"
             else:
+                identity = sha256(f"{data[CONF_URL]}|{data[CONF_CENTRE_ID]}".encode()).hexdigest()
+                for other in self._async_current_entries():
+                    if other.entry_id != (entry.entry_id if entry else None) and (
+                        other.data.get(CONF_URL) == data[CONF_URL]
+                        and other.data.get(CONF_CENTRE_ID) == data[CONF_CENTRE_ID]
+                    ):
+                        return self.async_abort(reason="already_configured")
                 if entry:
                     # Preserve registry IDs when the same installation changes its URL/key.
                     data["legacy_auth"] = False
-                    return self.async_update_reload_and_abort(entry, data_updates=data)
-                identity = sha256(f"{data[CONF_URL]}|{data[CONF_CENTRE_ID]}".encode()).hexdigest()
+                    return self.async_update_reload_and_abort(
+                        entry, data_updates=data, unique_id=identity
+                    )
                 await self.async_set_unique_id(identity)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -75,7 +83,7 @@ class RegistrosConfigFlow(ConfigFlow, domain=DOMAIN):
             fields[vol.Required(CONF_URL)] = TextSelector(
                 TextSelectorConfig(type=TextSelectorType.URL)
             )
-        if not entry:
+        if not entry or entry.data.get("legacy_auth"):
             fields[vol.Required(CONF_CENTRE_ID, default=DEFAULT_CENTRE)] = str
         marker = vol.Optional if step == "reconfigure" else vol.Required
         fields[marker(CONF_API_KEY)] = TextSelector(

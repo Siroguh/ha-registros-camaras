@@ -1,16 +1,34 @@
 """Typed HA actions with explicit retry identity and native response data."""
 
+import re
+
 import probatio as vol
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .api import ApiError, AuthenticationError, segment
 from .const import DOMAIN
 
 ENTRY = {vol.Required("config_entry_id"): cv.string}
+
+
+def exact_int(value):
+    if isinstance(value, bool) or not (
+        type(value) is int
+        or (type(value) is float and value.is_integer())
+        or (isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value))
+    ):
+        raise vol.Invalid("Expected an exact integer")
+    result = int(value)
+    if abs(result) > 9007199254740991:
+        raise vol.Invalid("Integer exceeds the API range")
+    return result
+
+
 COMMAND = {
     **ENTRY,
     vol.Required("command_id"): vol.All(
@@ -19,7 +37,7 @@ COMMAND = {
             r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
         ),
     ),
-    vol.Required("expected_revision"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+    vol.Required("expected_revision"): vol.All(exact_int, vol.Range(min=0)),
 }
 SCHEMAS = {
     "get_lot": {**ENTRY, vol.Required("lot_id"): cv.string},
@@ -27,7 +45,7 @@ SCHEMAS = {
     "get_snapshot": ENTRY,
     "get_lots": {
         **ENTRY,
-        vol.Optional("before"): cv.positive_int,
+        vol.Optional("before"): vol.All(exact_int, vol.Range(min=1)),
         vol.Optional("search"): cv.string,
         vol.Optional("limit", default=50): vol.All(vol.Coerce(int), vol.In([50, 100])),
     },
@@ -45,13 +63,13 @@ SCHEMAS = {
     "complete_task": {
         **COMMAND,
         vol.Required("task_id"): cv.string,
-        vol.Required("task_revision"): cv.positive_int,
+        vol.Required("task_revision"): vol.All(exact_int, vol.Range(min=1)),
         vol.Required("result"): dict,
     },
     "create_lot": {
         **COMMAND,
         vol.Required("code"): cv.string,
-        vol.Required("quantity"): vol.All(vol.Coerce(int), vol.Range(min=1)),
+        vol.Required("quantity"): vol.All(exact_int, vol.Range(min=1)),
         vol.Required("started_on"): cv.string,
     },
     "create_movement": {
@@ -67,8 +85,8 @@ SCHEMAS = {
 MANUAL = {**COMMAND, vol.Required("location_id"): cv.string, vol.Required("reason"): cv.string}
 MANUAL_RANGE = {
     vol.Required("limits"): dict,
-    vol.Required("starts_at"): vol.Coerce(int),
-    vol.Required("ends_at"): vol.Coerce(int),
+    vol.Required("starts_at"): exact_int,
+    vol.Required("ends_at"): exact_int,
 }
 SCHEMAS.update(
     {
@@ -131,22 +149,11 @@ def async_register_services(hass):
 
     for name, schema in SCHEMAS.items():
         if not hass.services.has_service(DOMAIN, name):
-            hass.services.async_register(
+            async_register_admin_service(
+                hass,
                 DOMAIN,
                 name,
                 handle,
                 schema=vol.Schema(schema),
                 supports_response=SupportsResponse.OPTIONAL,
             )
-
-
-@callback
-def async_unload_services(hass, entry):
-    if any(
-        other.entry_id != entry.entry_id and other.state is ConfigEntryState.LOADED
-        for other in hass.config_entries.async_entries(DOMAIN)
-    ):
-        return
-    for name in SCHEMAS:
-        if hass.services.has_service(DOMAIN, name):
-            hass.services.async_remove(DOMAIN, name)

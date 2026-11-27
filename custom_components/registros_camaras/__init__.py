@@ -9,10 +9,15 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import RegistrosClient
 from .const import CONF_CENTRE_ID, DEFAULT_CENTRE, DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
-from .services import async_register_services, async_unload_services
+from .services import async_register_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    async_register_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
@@ -28,20 +33,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) ->
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    async_register_services(hass)
-    entry.async_on_unload(entry.add_update_listener(async_reload))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
-    async_unload_services(hass, entry)
     return True
-
-
-async def async_reload(hass: HomeAssistant, entry: RegistrosConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:

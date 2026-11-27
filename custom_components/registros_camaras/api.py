@@ -2,7 +2,9 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import json
+import math
 import re
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -82,46 +84,62 @@ class Snapshot:
         return self.raw["tasks"]
 
 
+def _require(condition: bool) -> None:
+    if not condition:
+        raise ValueError("Invalid contract value")
+
+
+def _timestamp(value: Any) -> None:
+    _require(type(value) in (int, float) and math.isfinite(value))
+    datetime.fromtimestamp(value / 1000, UTC)
+
+
 def decode_snapshot(value: Any, centre_id: str) -> Snapshot:
     """Fail closed on malformed snapshots rather than publish plausible zeroes."""
     try:
-        assert value["apiVersion"] == 1
-        assert value["centreId"] == centre_id
-        assert value["status"] in {"ready", "pending"}
+        _require(type(value["apiVersion"]) is int and value["apiVersion"] == 1)
+        _require(value["centreId"] == centre_id)
+        _require(value["status"] in {"ready", "pending"})
         for key in ("revision", "planRevision"):
-            assert type(value[key]) is int and value[key] >= 0
-        assert isinstance(value["sampledAt"], str)
+            _require(type(value[key]) is int and value[key] >= 0)
+        _require(isinstance(value["sampledAt"], str))
         for key in ("locations", "chambers", "tasks"):
-            assert isinstance(value[key], list)
+            _require(isinstance(value[key], list))
         for loc in value["locations"]:
-            assert isinstance(loc["id"], str) and isinstance(loc["name"], str)
-            assert loc["centreId"] == centre_id
-            assert loc["kind"] in {"chamber", "storage", "terminal"}
-            assert type(loc["archived"]) is bool
+            _require(isinstance(loc["id"], str) and isinstance(loc["name"], str))
+            _require(loc["centreId"] == centre_id)
+            _require(loc["kind"] in {"chamber", "storage", "terminal"})
+            _require(type(loc["archived"]) is bool)
         for chamber in value["chambers"]:
-            assert isinstance(chamber["locationId"], str)
-            assert chamber["status"] in {"empty", "no_plan", "no_phase", "compatible", "conflict"}
-            assert isinstance(chamber.get("occupants", []), list)
+            _require(isinstance(chamber["locationId"], str))
+            _require(
+                chamber["status"] in {"empty", "no_plan", "no_phase", "compatible", "conflict"}
+            )
+            _require(isinstance(chamber.get("occupants", []), list))
             for occupant in chamber.get("occupants", []):
-                assert isinstance(occupant["lotId"], str)
-                assert type(occupant["quantity"]) is int and occupant["quantity"] >= 0
+                _require(isinstance(occupant["lotId"], str))
+                _require(type(occupant["quantity"]) is int and occupant["quantity"] >= 0)
             for key in ("effective", "ideal", "automatic"):
                 _validate_limits(chamber[key])
             if chamber["manual"] is not None:
                 _validate_limits(chamber["manual"]["limits"])
+                _require(chamber["manual"]["limits"] is not None)
+                _require(isinstance(chamber["manual"]["id"], str))
+                _timestamp(chamber["manual"]["startsAt"])
+                _timestamp(chamber["manual"]["endsAt"])
             if (proposal := chamber["proposal"]) is not None:
-                assert isinstance(proposal["id"], str)
-                assert type(proposal["overdue"]) is bool
-                assert isinstance(proposal["dueAt"], (int, float))
+                _require(isinstance(proposal["id"], str))
+                _require(type(proposal["overdue"]) is bool)
+                _timestamp(proposal["dueAt"])
                 _validate_limits(proposal["limits"])
         for task in value["tasks"]:
-            assert isinstance(task["id"], str) and isinstance(task["lotId"], str)
-            assert task["status"] in {"pending", "due"}
-            assert type(task["revision"]) is int
-            assert isinstance(task["dueAt"], (int, float))
-            assert task["step"]["kind"] in {"curing_review", "quality_check", "remove_product"}
+            _require(isinstance(task["id"], str) and isinstance(task["lotId"], str))
+            _require(task["status"] in {"pending", "due"})
+            _require(type(task["revision"]) is int)
+            _timestamp(task["dueAt"])
+            _require(task["step"]["kind"] in {"curing_review", "quality_check", "remove_product"})
         return Snapshot(value)
-    except (AssertionError, KeyError, TypeError, ValueError) as err:
+    except (KeyError, TypeError, ValueError, OverflowError, OSError) as err:
         raise IncompatibleApi("Invalid integration snapshot") from err
 
 
@@ -130,9 +148,9 @@ def _validate_limits(limits: Any) -> None:
         return
     for metric in ("temperature", "humidity"):
         bounds = limits[metric]
-        assert type(bounds["min"]) in (int, float)
-        assert type(bounds["max"]) in (int, float)
-        assert bounds["min"] <= bounds["max"]
+        _require(type(bounds["min"]) in (int, float) and math.isfinite(bounds["min"]))
+        _require(type(bounds["max"]) in (int, float) and math.isfinite(bounds["max"]))
+        _require(bounds["min"] <= bounds["max"])
 
 
 MOVEMENT_ERRORS = {

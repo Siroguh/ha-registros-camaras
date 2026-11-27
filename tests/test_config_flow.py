@@ -1,5 +1,6 @@
 """Configuration and native Better Auth keys, including legacy upgrade."""
 
+from hashlib import sha256
 from unittest.mock import patch
 
 import pytest
@@ -68,11 +69,46 @@ async def test_reauth_and_legacy_migration(hass, client):
     )
     with patch("custom_components.registros_camaras.async_setup_entry", return_value=True):
         result = await hass.config_entries.flow.async_configure(
-            result["flow_id"], {"url": "https://new.example", "api_key": "new-native-key"}
+            result["flow_id"],
+            {
+                "url": "https://new.example",
+                "api_key": "new-native-key",
+                "centre_id": "another-centre",
+            },
         )
         assert result["type"] is FlowResultType.ABORT
         assert result["reason"] == "reauth_successful"
         assert entry.data["url"] == "https://new.example"
         assert entry.data.get("legacy_auth") is not True
-        assert entry.unique_id == "legacy-account"
+        assert entry.data["centre_id"] == "another-centre"
+        assert entry.unique_id == sha256(b"https://new.example|another-centre").hexdigest()
         await hass.async_block_till_done()
+
+
+async def test_reconfigure_moves_identity_and_rejects_duplicate_destination(hass, client):
+    with patch("custom_components.registros_camaras.async_setup_entry", return_value=True):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}, data=DATA
+        )
+        entry = result["result"]
+        await hass.async_block_till_done()
+        changed = {**DATA, "url": "https://other.example"}
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}, data=changed
+        )
+        assert result["reason"] == "reconfigure_successful"
+        await hass.async_block_till_done()
+        duplicate = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}, data=changed
+        )
+        assert duplicate["reason"] == "already_configured"
+        released = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}, data=DATA
+        )
+        assert released["type"] is FlowResultType.CREATE_ENTRY
+        await hass.async_block_till_done()
+        blocked = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "reconfigure", "entry_id": entry.entry_id}, data=DATA
+        )
+        assert blocked["reason"] == "already_configured"
+        assert entry.data["url"] == changed["url"]

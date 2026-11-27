@@ -181,3 +181,59 @@ async def test_business_rejection_is_not_a_stale_revision(aiohttp_client, socket
     with pytest.raises(Rejected, match="fecha precede") as caught:
         await client.request("GET", "options")
     assert "private detail" not in str(caught.value)
+
+
+@pytest.mark.parametrize("value", [2.9, True, "2.9", float("inf"), 9007199254740992])
+def test_command_integer_conversion_never_truncates(value):
+    import probatio as vol
+
+    from custom_components.registros_camaras.services import SCHEMAS
+
+    data = {
+        "config_entry_id": "entry",
+        "command_id": "00000000-0000-4000-8000-000000000123",
+        "expected_revision": 7,
+        "code": "A",
+        "quantity": 2,
+        "started_on": "2026-11-27",
+    }
+    for key in ("quantity", "expected_revision"):
+        with pytest.raises(vol.Invalid):
+            vol.Schema(SCHEMAS["create_lot"])({**data, key: value})
+
+
+@pytest.mark.parametrize("end", [None, "tomorrow", float("inf"), 10**30])
+def test_invalid_manual_end_is_rejected_before_entity_update(raw, end):
+    raw["chambers"][0]["manual"] = {
+        "id": "manual",
+        "startsAt": 1,
+        "endsAt": end,
+        "limits": raw["chambers"][0]["effective"],
+    }
+    with pytest.raises(IncompatibleApi):
+        decode_snapshot(raw, DEFAULT_CENTRE)
+
+
+def test_validation_survives_python_optimization(raw):
+    import subprocess
+    import sys
+
+    raw["apiVersion"] = 2
+    script = """
+import json, sys
+from custom_components.registros_camaras.api import decode_snapshot, IncompatibleApi
+value = json.load(sys.stdin)
+try:
+    decode_snapshot(value, 'villarroya-01-01')
+except IncompatibleApi:
+    sys.exit(0)
+sys.exit(1)
+"""
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", script],
+        input=json.dumps(raw),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

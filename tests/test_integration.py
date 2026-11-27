@@ -4,10 +4,12 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.registros_camaras.api import CannotConnect, decode_snapshot
 from custom_components.registros_camaras.const import DEFAULT_CENTRE, DOMAIN
 from custom_components.registros_camaras.diagnostics import async_get_config_entry_diagnostics
+from homeassistant.core import Context
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
@@ -59,7 +61,7 @@ async def test_entities_fail_closed_and_discover_new_chambers(hass, entry, clien
     await coordinator.async_refresh()
     assert hass.states.get(quantity).state == "unavailable"
     assert await hass.config_entries.async_unload(entry.entry_id)
-    assert not hass.services.has_service(DOMAIN, "confirm_proposal")
+    assert hass.services.has_service(DOMAIN, "confirm_proposal")
 
 
 async def test_services_preserve_receipt_and_retry_identity(hass, entry, client):
@@ -106,3 +108,48 @@ async def test_services_preserve_receipt_and_retry_identity(hass, entry, client)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert entity_id(hass, entry, "sensor", "cam-1", "quantity") == old_id
+
+
+async def test_admin_gate_rejects_reads_and_writes_before_client(hass, entry, client):
+    await setup(hass, entry)
+    user = MockUser().add_to_hass(hass)
+    client.reset_mock()
+    with patch.object(entry.runtime_data.client, "command", new=AsyncMock()) as send:
+        for service, data in [
+            ("get_snapshot", {}),
+            (
+                "create_lot",
+                {
+                    "command_id": "00000000-0000-4000-8000-000000000123",
+                    "expected_revision": 7,
+                    "code": "A",
+                    "quantity": 2,
+                    "started_on": "2026-11-27",
+                },
+            ),
+        ]:
+            with pytest.raises(HomeAssistantError):
+                await hass.services.async_call(
+                    DOMAIN,
+                    service,
+                    {"config_entry_id": entry.entry_id, **data},
+                    blocking=True,
+                    return_response=True,
+                    context=Context(user_id=user.id),
+                )
+        send.assert_not_called()
+    client.assert_not_called()
+
+
+async def test_actions_exist_when_first_connection_fails(hass, entry, client):
+    client.side_effect = CannotConnect("Offline")
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    assert hass.services.has_service(DOMAIN, "get_snapshot")
+    with pytest.raises(HomeAssistantError, match="loaded"):
+        await hass.services.async_call(
+            DOMAIN,
+            "get_snapshot",
+            {"config_entry_id": entry.entry_id},
+            blocking=True,
+            return_response=True,
+        )
