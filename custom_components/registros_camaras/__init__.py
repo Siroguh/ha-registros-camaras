@@ -1,44 +1,58 @@
+"""Registros Cámaras 2 integration, based on custom-components/blueprint."""
+
 from homeassistant.const import CONF_API_KEY, CONF_URL, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import RegistrosClient
-from .bridge import async_register
-from .const import DOMAIN
+from .const import CONF_CENTRE_ID, DEFAULT_CENTRE, DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
-from .notifications import async_remove_notifications, async_setup_notifications
+from .services import async_register_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.BUTTON]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    await async_register(hass)
-    await async_setup_notifications(hass)
+    async_register_services(hass)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
-    await async_setup_notifications(hass, entry)
+    if entry.data.get("legacy_auth"):
+        raise ConfigEntryAuthFailed("Configure the new server URL and a native Better Auth API key")
     client = RegistrosClient(
-        async_get_clientsession(hass), entry.data[CONF_URL], entry.data[CONF_API_KEY]
+        async_get_clientsession(hass),
+        entry.data[CONF_URL],
+        entry.data[CONF_API_KEY],
+        entry.data[CONF_CENTRE_ID],
     )
     coordinator = RegistrosCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
-    entry.async_on_unload(entry.add_update_listener(async_reload))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    return True
 
 
-async def async_remove_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> None:
-    await async_remove_notifications(hass, entry)
-
-
-async def async_reload(hass: HomeAssistant, entry: RegistrosConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+async def async_migrate_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
+    if entry.version > 2:
+        return False
+    if entry.version == 1:
+        hass.config_entries.async_update_entry(
+            entry,
+            version=2,
+            data={
+                **entry.data,
+                CONF_CENTRE_ID: DEFAULT_CENTRE,
+                "legacy_auth": True,
+            },
+        )
+    return True

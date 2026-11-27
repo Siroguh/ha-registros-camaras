@@ -1,200 +1,146 @@
 # Registros Cámaras para Home Assistant
 
-Esta integración pertenece al proyecto **[Siroguh/registros_camaras](https://github.com/Siroguh/registros_camaras)**,
-su repositorio padre y servidor API. El código fuente, las incidencias y las releases
-de la integración se mantienen exclusivamente en este repositorio independiente:
-**[Siroguh/registros_camaras_home_assistant](https://github.com/Siroguh/registros_camaras_home_assistant)**.
+Integración de **Registros Cámaras 2**, mantenida en
+[Siroguh/registros_camaras_home_assistant](https://github.com/Siroguh/registros_camaras_home_assistant).
+La versión 1.0 sustituye al cliente del antiguo servidor `registros_camaras`.
+Usa la API autenticada de la aplicación nueva; no consulta directamente D1.
 
-Cliente de la API REST de **Registros Cámaras**, instalable como integración personalizada
-de HACS. Requiere Home Assistant **2026.10 o posterior** y el servidor de Registros Cámaras
-con controles operativos y confirmaciones compartidas (migración `0018`).
+## Instalación y configuración
 
-## Qué incluye esta versión
+Requiere Home Assistant **2026.10.3 o posterior** y un servidor que implemente
+`GET /api/integration/:centreId`, versión de contrato 1.
 
-- Configuración desde **Ajustes → Dispositivos y servicios → Añadir integración**.
-- Conexión con la URL de la aplicación y una clave de integración propia.
-- Una entidad de diagnóstico **Conexión**, actualizada cada 60 segundos.
-- Reintento de conexión, reautenticación si se revoca la clave y reconfiguración de la URL.
-- Diagnósticos sin claves, direcciones del servidor ni datos personales.
-- Interfaz en español e inglés.
+1. Añade este repositorio como integración personalizada en HACS, o en la
+   Marketplace integrada de HA 2026.11 o posterior.
+2. Instala y reinicia Home Assistant.
+3. En **Ajustes → Dispositivos y servicios → Añadir integración**, busca Registros Cámaras.
+4. Introduce la URL raíz de la aplicación, el centro (por defecto `villarroya-01-01`)
+   y una **clave API nativa de Better Auth**, creada desde **Cuenta** en la aplicación.
 
-La versión 0.2 incorpora entidades por cámara: rangos de consigna vigente, origen,
-fin de consigna manual, indicador de cambio pendiente y botón de confirmación.
-Ofrece acciones `create_lot`, `register_movement`, `set_manual` y `confirm_change`.
-La versión 0.3 añade `update_movement`, `update_manual` y `finish_manual`, además
-de las lecturas `movements` y `manuals` en el puente WebSocket.
-Los campos se muestran en la interfaz de acciones de HA y se pueden usar en automatizaciones.
-Los controles interactivos requieren un administrador de HA; las automatizaciones locales
-también pueden llamar a las acciones. Todas las operaciones se validan en la API.
+La URL debe ser accesible desde HA. Para desarrollo puede ser
+`https://omarchythinkpad.powan-bee.ts.net:1301` mientras `vp run dev` esté activo.
+No uses `localhost` para apuntar a otro ordenador. Se valida TLS y no se siguen
+redirecciones de las peticiones autenticadas. Las claves antiguas `rc_` no sirven.
+La integración nunca entrega la clave a las tarjetas ni a los diagnósticos.
 
-Las entidades de cámara exponen `active_lots`: número de lotes con existencias actuales
-según la API. Los indicadores ambientales del panel pueden limitarse a cámaras ocupadas
-y comparar cada lectura con sus límites de consigna vigente, incluidos los manuales.
+No se ha enviado este repositorio al catálogo público: se instala como repositorio
+personalizado. `hacs.json` sirve para HACS y Marketplace; no es una app/add-on de HA OS.
 
-Para los formularios visuales instala un único complemento adicional de HACS:
-[Registros Cámaras — Tarjetas](https://github.com/Siroguh/registros_camaras_cards).
-Incluye tres tarjetas independientes y editores visuales, sin copiar archivos ni escribir YAML.
+## Entidades
 
-## Instalar con HACS
+Un dispositivo de centro contiene conexión, tareas pendientes/vencidas y actualizar.
+Cada cámara tiene:
 
-1. En **HACS → menú de tres puntos → Repositorios personalizados**, añade:
-   `https://github.com/Siroguh/registros_camaras_home_assistant`.
-2. Selecciona el tipo **Integración**.
-3. Busca **Registros Cámaras** en HACS e instálala.
-4. Reinicia Home Assistant.
-5. En **Ajustes → Dispositivos y servicios → Añadir integración**, busca **Registros Cámaras**.
+- Cantidad y número de lotes (con ocupantes en atributos).
+- Estado del plan: vacía, sin plan/fase, compatible o conflicto.
+- Mínimo/máximo de temperatura y humedad **efectivos**, no lecturas del sensor.
+- Propuesta y sus límites/ID; propuesta pendiente/vencida, conflicto y manual activa.
 
-El repositorio es exclusivamente personalizado. No se solicita ni se pretende su inclusión
-en el catálogo general. La validación HACS comprueba formato técnico, no registra el proyecto.
-HACS gestiona los archivos del cliente y sus actualizaciones, no el servidor de la aplicación.
+Los sensores físicos de temperatura/humedad siguen siendo los de HA. Sondeo compartido
+cada 30 segundos. Las altas de cámaras se descubren sin reiniciar. Si falla la conexión,
+la cámara está archivada o el servidor está reconciliando, las entidades operativas
+están `unavailable`, nunca representan cero existencias por un fallo de lectura.
+Los atributos `centre_id`, `location_id`, `revision` y `active_lots` permiten construir
+tarjetas y conservar los indicadores visuales de cámaras ocupadas.
 
-## Conectar
+## Acciones nativas
 
-1. Abre el cliente web de Registros Cámaras e inicia sesión.
-2. En **Home Assistant → Cliente de Home Assistant**, escribe un nombre y pulsa **Crear clave**.
-3. Copia la clave `rc_…`, que solo se muestra en ese momento.
-4. En el formulario de la integración de HA, introduce:
-   - **URL de la aplicación:** su origen con protocolo y puerto, por ejemplo
-     `https://app.example.com`, sin `/api` ni ruta de página.
-   - **Clave de integración:** la clave que acabas de crear.
+Las llamadas de usuario requieren administrador de Home Assistant, como en el
+bridge anterior. Las automatizaciones internas pueden utilizar las mismas acciones.
 
-La URL debe ser accesible **desde el equipo donde se ejecuta Home Assistant**. Si usas
-Tailscale, ese equipo debe tener acceso a la tailnet y poder resolver el nombre del servidor.
-El cliente verifica los certificados HTTPS y no sigue redirecciones con la clave.
+Todas están bajo `registros_camaras`, tienen campos en el editor de acciones y
+admiten `return_response`/`response_variable`:
 
-La clave se guarda en la configuración privada de Home Assistant. Nunca se introduce en
-archivos del repositorio, YAML público ni código Python. El servidor guarda únicamente su
-hash SHA-256 y un prefijo identificativo. La clave existente de HA que utiliza el servidor
-para recoger lecturas es otra credencial, para la dirección contraria.
+| Acción | Uso |
+| --- | --- |
+| `get_snapshot` | Estado versionado, catálogo, cámaras y tareas pendientes. |
+| `get_lots` | Página de inventario; continuar con `nextBefore` como `before`. |
+| `get_lot` | Ficha; comprobar `status: projected`. |
+| `get_movement_options` | Disponibilidad al día efectivo; `correcting` opcional. |
+| `get_movement_history` | Operaciones; comprobar `status: projected`. |
+| `confirm_proposal` | Confirmar exactamente `proposal_id` y revisión mostrados. |
+| `schedule_manual`, `replace_manual`, `finish_manual` | Ciclo auditado de consignas manuales. |
+| `complete_task` | Resultado tipado y `task_revision`; retirada no mueve stock. |
+| `create_lot` | Alta con código, cantidad y día local. |
+| `create_movement`, `correct_movement` | Repartos, mezcla, procedencias y motivo de corrección. |
 
-El servidor concede `connection:read`, `cameras:read`, `lots:write`, `movements:write`,
-`consignas:write`, `consignas:confirm`, `consignas:edit`, `consignas:finish`,
-`movements:read` y `movements:edit`. Incluye lecturas, altas y correcciones operativas,
-sin borrados ni edición de planes. La clave no abre sesiones
-Better Auth, no permite gestionar otras claves y no da acceso al visor de base de datos.
-Las claves existentes obtienen estas capacidades al actualizar el servidor.
-Una cuenta de la aplicación se configura una sola vez en HA; cambiar de clave conserva las entidades.
+Siempre se selecciona `config_entry_id`. Los comandos exigen un UUID `command_id`
+y `expected_revision` del centro. Guarda ambos junto con el contenido: reintentar
+la misma operación conserva el UUID, revisión y datos, incluso tras reiniciar HA.
+Nunca se reintenta automáticamente una escritura con otra revisión. Un conflicto
+requiere consultar y revisar los datos; un fallo de transporte puede significar que
+ya fue aceptada. Una lectura fallida después de la aceptación no oculta su recibo.
 
-## Estado y mantenimiento
+## Tarjetas
 
-La entidad **Conexión** muestra conectado tras una consulta autenticada correcta.
-Si falla la consulta, queda **no disponible** hasta que se recupere la conexión.
-Sus atributos muestran la versión de API y las capacidades anunciadas por el servidor.
-El dispositivo incluye un enlace para abrir la aplicación.
+Se pueden usar tarjetas nativas Entity/Entities/Tile/History con estas entidades.
+Los nombres de entidad los asigna HA; selecciónalos mediante el editor visual.
 
-- **Cambiar dirección o clave:** menú de la integración → **Reconfigurar**. Deja la clave
-  vacía si quieres conservarla.
-- **Revocar:** en la web de la aplicación, pulsa **Revocar** junto a la clave. HA pedirá
-  una nueva credencial al detectar el rechazo de autenticación.
-- **Desinstalar:** elimina la integración en HA y revoca su clave en la aplicación.
-  Eliminar la entrada en HA no borra registros de la aplicación.
+Las tarjetas personalizadas
+[registros_camaras_cards](https://github.com/Siroguh/registros_camaras_cards) **1.0+**
+usan estas mismas acciones nativas. Conservan cámara/consignas, alta de lotes,
+movimientos totales/parciales, procedencias, corrección, diálogos y editores.
+El bridge WebSocket `registros_camaras/operation` anterior se ha retirado.
 
-## Arquitectura y ampliación
+Para una tarjeta propia:
 
-```text
-Home Assistant → cliente HTTP Python → API pública /api/v1 → reglas de negocio y base de datos
-Cliente web    → cliente HTTP TS     → misma API
+```js
+const { response: snapshot } = await hass.callWS({
+  type: "call_service", domain: "registros_camaras", service: "get_snapshot",
+  service_data: { config_entry_id: entryId }, return_response: true
+});
+// Mostrar snapshot; conservar su revisión y el ID que el usuario revisó.
+// Crear una vez con crypto.randomUUID(), y conservar para reintentos.
+await hass.callWS({
+  type: "call_service", domain: "registros_camaras", service: "confirm_proposal",
+  service_data: { config_entry_id: entryId, command_id: commandId,
+    expected_revision: snapshot.revision, location_id: locationId, proposal_id: proposalId },
+  return_response: true
+});
 ```
 
-`api.py` contiene el transporte HTTP y la validación del contrato. No depende de Home Assistant.
-`config_flow.py` configura la conexión; `coordinator.py` comparte las consultas entre entidades;
-las plataformas presentan los datos de la API. No se accede a SQLite desde esta integración.
+## Actualizar desde el cliente antiguo
 
-El contrato inicial es `GET /api/v1/integration/status`, autenticado con
-`Authorization: Bearer <clave>`. Devuelve `application`, `apiVersion`, `name`, `accountId`,
-`capabilities` y `status`. `accountId` es una identidad estable de la cuenta, independiente de
-la URL y de las rotaciones de clave. Nuevas capacidades se implementarán en la API y después
-se expondrán como acciones o entidades de HA; no se acepta una ruta HTTP arbitraria desde acciones.
+La entrada v1 se migra a v2 y pide la dirección y clave del servidor nuevo.
+Actualizar la integración Python requiere reiniciar HA; actualizar solo las tarjetas
+requiere recargar el navegador. Sustituir los archivos debe eliminar también los
+antiguos `bridge.py` y `notifications.py`. Las reglas de notificación permanecen en
+el servidor; este cliente no añade avisos automáticos.
 
-El estado de cámaras se consulta con `GET /api/v1/integration/dashboard`. Las altas
-usan los mismos endpoints públicos de lotes, movimientos y consignas que la web.
-`GET /api/v1/lotes/:id/opciones-movimiento?fecha=YYYY-MM-DD` devuelve las porciones
-disponibles para esa fecha; HA no reconstruye ni valida genealogías.
-Al corregir, `movimientoId` limita esas porciones al instante anterior a la operación,
-respetando su orden dentro del día. El servidor revalida también los movimientos posteriores.
-Las ediciones usan `PUT` sobre el movimiento o consigna identificados, con revisión optimista.
-`POST /api/v1/ubicaciones/:id/consignas/:consignaId/finalizar` recibe `{ revision }`
-y termina únicamente una manual vigente, usando la hora del servidor y conservando el historial.
-Requiere el servidor padre actualizado con estas capacidades; no necesita migraciones nuevas.
+Los identificadores internos de entidad han cambiado. Al sustituir una entrada,
+hay que portar las referencias del dashboard (incluidas las embebidas en estilos
+Bubble Card), y retirar recursos/entidades antiguos. Conservar previamente copia
+del dashboard y del componente. La nueva tarjeta acepta las mismas opciones YAML:
+`entry_id`, `location_id`, `title`, `temperature_entity`, `humidity_entity`.
 
-## Confirmaciones y notificaciones
+## Plantilla y desarrollo
 
-La API conserva la última automática confirmada mientras una propuesta nueva está pendiente.
-Sin primera confirmación no hay automática vigente. Una consigna manual domina durante su
-intervalo; al terminar vuelve la última automática confirmada, con propuesta pendiente si
-el plan actual difiere. Si la cámara queda vacía, faltan reglas o hay conflicto, la propuesta
-es retirar la automática y también requiere confirmación. No se envían órdenes a actuadores.
+Estructura basada en la plantilla recomendada por HACS
+[custom-components/blueprint](https://github.com/custom-components/blueprint), commit
+`cd399dac2a7e88d899dd62b3f5d8bbf91f1adadd`: config flow, cliente asíncrono,
+`DataUpdateCoordinator`, `CoordinatorEntity`, `ConfigEntry.runtime_data` y descarga.
+Se adaptó a las APIs actuales de HA y al servidor. Licencia/atribución en `NOTICE`.
 
-La propuesta tiene un UUID propio. Tarjeta, botón, notificación y web confirman mediante
-`POST /api/v1/ubicaciones/:id/confirmacion` con `{ "propuestaId": "..." }`. El servidor
-recalcula dentro de una transacción y rechaza propuestas obsoletas con HTTP 409.
-El servidor también detecta propuestas y vencimientos en segundo plano, sin depender del
-sondeo de HA. Las reglas y destinos se configuran en **Notificaciones** de la aplicación
-principal; Restate ejecuta los avisos y reintentos durables. El servidor llama directamente
-a los servicios `notify` de HA o a `persistent_notification.create` usando su conexión HA.
-La antigua opción local `notify_service` ya no se utiliza. Antes de actualizar esta
-integración, despliega el servidor con Restate y crea las reglas de propuesta que necesites.
+Referencias consultadas el 27/11/2026:
+- https://www.hacs.xyz/docs/publish/integration/
+- https://contributors.home-assistant.io/marketplace/guides/integrations/
+- https://contributors.home-assistant.io/marketplace/reference/hacs-json/
 
-Esta integración solo reenvía las acciones móviles `rcn:<servidor>:<notificación>:<acción>`
-a `POST /api/v1/notifications/:id/actions`. Solo admite administradores activos de HA,
-comprobados mediante el contexto autenticado del evento móvil y de nuevo antes del envío.
-Guarda cada respuesta en `.storage/registros_camaras.<entry_id>.notification_relay`
-con escritura atómica y `fsync` **antes** de enviarla; los fallos de escritura se propagan
-y no dejan una respuesta sin guardar disponible para el envío. Conserva el UUID durante
-los reintentos y reanuda la cola tras reiniciar HA.
-
-La captura se registra antes de conectar con la API y usa la última identidad verificada
-guardada en disco, incluso mientras la entrada espera conexión o reautenticación.
-Un único propietario de la cola vive durante toda la ejecución de HA, también durante
-recargas, para evitar escrituras de instantáneas desactualizadas. Cada respuesta conserva
-su ámbito de servidor: solo se envía si una consulta autenticada reciente anuncia ese mismo
-ámbito y cuenta. Si cambia el servidor o deja de anunciarlo, las respuestas anteriores se
-conservan sin enviarlas. Una clave revocada inicia reautenticación sin perder la cola.
-
-Reintenta cada 30 segundos con hasta 50 notificaciones independientes por pasada y turno
-rotativo; un fallo transitorio no bloquea respuestas de otras notificaciones. Las respuestas
-de una misma notificación conservan su orden. Incluye el archivo de cola en las copias de HA.
-Si un usuario pierde permisos, su respuesta se descarta localmente con un aviso persistente
-y deja pasar la siguiente respuesta de esa notificación. Si una cola no puede leerse,
-se conserva intacta y se bloquea solo ese relay; los controles y las otras entradas siguen
-funcionando. Tras restaurar la copia, recarga la entrada. Un fallo al retirar una respuesta
-ya enviada conserva su UUID para reintento automático y no pide volver a pulsar.
-Eliminar permanentemente la entrada detiene el relay, espera las escrituras pendientes
-y elimina su archivo local; recargar o reautenticar conserva la cola.
-El servidor decide permisos, vigencia de la propuesta y deduplicación. Un rechazo definitivo
-se muestra como notificación persistente. Los avisos persistentes sin botones se responden
-desde la web. Acusar recibo no recupera una alarma; no confirmar no modifica una consigna.
-Aceptar un envío en HA tampoco demuestra su entrega o lectura en un teléfono.
-
-Las tarjetas hablan con el puente WebSocket de la integración, no directamente con la
-API. El puente tiene una lista cerrada de operaciones y no expone la clave ni acepta URLs.
-
-## Código fuente y publicación
-
-Este repositorio es la única fuente de la integración y su distribución para HACS.
-Se desarrolla directamente en `custom_components/registros_camaras`; no se exporta
-desde el repositorio padre. El servidor y sus reglas de negocio pertenecen a
-[registros_camaras](https://github.com/Siroguh/registros_camaras), y las tarjetas a
-[registros_camaras_cards](https://github.com/Siroguh/registros_camaras_cards).
-No contiene la base de datos, claves ni configuración local del proyecto.
-
-Para publicar una actualización, revisa el diff, actualiza la versión de
-`custom_components/registros_camaras/manifest.json` y publica una release con el mismo tag.
-
-Comprobaciones estáticas desde este directorio:
-
-```bash
-sh scripts/setup-hooks.sh
+```sh
+uv sync --locked
 sh scripts/check.sh
 ```
 
-El último comando genera `dist/registros_camaras.zip` para instalación manual.
-La instalación configura Ruff, pre-commit y Gitleaks con versiones fijadas.
-Consulta [CI, hooks y Pullfrog](.github/ci.md) para el flujo de PRs.
-HACS instala desde los archivos del repositorio correspondientes a la release.
-La CI ejecuta comprobaciones estáticas Python, Hassfest y HACS; no ejecuta tests.
+Pruebas con Home Assistant real 2026.10.3, HTTP local, flujos, reautenticación,
+entidades, descubrimiento, disponibilidad, servicios, descarga y recarga.
+El plugin de fixtures se fija por separado y su dependencia HA se ajusta a la
+versión mínima con `override-dependencies`. No instala dependencias de tests en HA.
+`package.py` genera `dist/registros_camaras.zip` sin credenciales ni cachés.
 
-## Licencia
+Desde el servidor, la prueba cruzada opcional ejecuta el cliente Python contra un
+Worker/D1/R2 desechable y comprueba Bearer, snapshot y rechazo de revisión obsoleta:
 
-Copyright (C) 2026 Siroguh. Este cliente se distribuye bajo **GPL-3.0-only**,
-GNU General Public License versión 3. Consulta [LICENSE](LICENSE).
+```sh
+REGISTROS_HA_CHECKOUT=/ruta/registros_camaras_home_assistant \
+  vp test run scripts/observations.test.ts -t 'real Worker persists operational tasks'
+```

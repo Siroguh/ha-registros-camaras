@@ -1,64 +1,60 @@
+"""Connection, synchronization, pending proposals and conflicts."""
+
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
-from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.const import EntityCategory
 
-from .const import DOMAIN
-from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
-from .entity import CameraEntity, add_cameras
-
-PARALLEL_UPDATES = 0
+from .entity import RegistrosEntity, discover
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: RegistrosConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
-) -> None:
-    async_add_entities([ConnectionSensor(entry.runtime_data)])
-    add_cameras(
-        entry,
+async def async_setup_entry(hass, entry, async_add_entities):
+    coordinator = entry.runtime_data
+    async_add_entities([ConnectionSensor(coordinator)])
+    discover(
+        coordinator,
         async_add_entities,
-        lambda camera: [PendingSensor(entry.runtime_data, camera, "pending", "Cambio pendiente")],
+        lambda location: [
+            CameraBinarySensor(coordinator, key, location)
+            for key in ("proposal_pending", "proposal_overdue", "conflict", "manual_active")
+        ],
     )
 
 
-class PendingSensor(CameraEntity, BinarySensorEntity):
+class ConnectionSensor(RegistrosEntity, BinarySensorEntity):
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator, "connection")
+
+    @property
+    def available(self):
+        return True
+
     @property
     def is_on(self):
-        return bool((self.camera or {}).get("pendiente"))
+        return self.coordinator.last_update_success
 
     @property
     def extra_state_attributes(self):
-        return {**super().extra_state_attributes, "pending": (self.camera or {}).get("pendiente")}
+        return {
+            **super().extra_state_attributes,
+            "synchronization": self.coordinator.data.raw["status"],
+        }
 
 
-class ConnectionSensor(CoordinatorEntity[RegistrosCoordinator], BinarySensorEntity):
-    _attr_has_entity_name = True
-    _attr_translation_key = "connection"
-    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_is_on = True
-
-    def __init__(self, coordinator: RegistrosCoordinator) -> None:
-        super().__init__(coordinator)
-        status = coordinator.data
-        self._attr_unique_id = f"{status.account_id}_connection"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, status.account_id)},
-            name=status.name,
-            entry_type=DeviceEntryType.SERVICE,
-            manufacturer="Registros Cámaras",
-            model="REST API",
-            sw_version=f"API {status.api_version}",
-            configuration_url=coordinator.client.base_url,
-        )
+class CameraBinarySensor(RegistrosEntity, BinarySensorEntity):
+    def __init__(self, coordinator, key, location):
+        super().__init__(coordinator, key, location)
+        self.key = key
+        if key in {"conflict", "proposal_overdue"}:
+            self._attr_device_class = BinarySensorDeviceClass.PROBLEM
 
     @property
-    def extra_state_attributes(self) -> dict[str, object]:
-        return {
-            "api_version": self.coordinator.data.api_version,
-            "capabilities": list(self.coordinator.data.capabilities),
-        }
+    def is_on(self):
+        chamber = self.chamber
+        if self.key == "conflict":
+            return chamber["status"] == "conflict"
+        if self.key == "manual_active":
+            return chamber["manual"] is not None
+        proposal = chamber["proposal"]
+        return proposal is not None and (self.key == "proposal_pending" or proposal["overdue"])
