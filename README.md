@@ -45,6 +45,9 @@ tarjetas y conservar los indicadores visuales de cámaras ocupadas.
 
 ## Acciones nativas
 
+Las llamadas de usuario requieren administrador de Home Assistant, como en el
+bridge anterior. Las automatizaciones internas pueden utilizar las mismas acciones.
+
 Todas están bajo `registros_camaras`, tienen campos en el editor de acciones y
 admiten `return_response`/`response_variable`:
 

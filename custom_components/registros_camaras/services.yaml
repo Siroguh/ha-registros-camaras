@@ -79,7 +79,7 @@ complete_task:
     task_revision:
       required: true
       selector:
-        number: {min: 1, mode: box}
+        number: {min: 0, mode: box}
     result:
       required: true
       selector:

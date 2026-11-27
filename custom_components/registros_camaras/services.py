@@ -47,7 +47,7 @@ SCHEMAS = {
         **ENTRY,
         vol.Optional("before"): vol.All(exact_int, vol.Range(min=1)),
         vol.Optional("search"): cv.string,
-        vol.Optional("limit", default=50): vol.All(vol.Coerce(int), vol.In([50, 100])),
+        vol.Optional("limit", default=50): vol.All(exact_int, vol.In([50, 100])),
     },
     "get_movement_options": {
         **ENTRY,
@@ -63,7 +63,7 @@ SCHEMAS = {
     "complete_task": {
         **COMMAND,
         vol.Required("task_id"): cv.string,
-        vol.Required("task_revision"): vol.All(exact_int, vol.Range(min=1)),
+        vol.Required("task_revision"): vol.All(exact_int, vol.Range(min=0)),
         vol.Required("result"): dict,
     },
     "create_lot": {

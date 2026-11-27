@@ -153,3 +153,23 @@ async def test_actions_exist_when_first_connection_fails(hass, entry, client):
             blocking=True,
             return_response=True,
         )
+
+
+async def test_task_revision_zero_reaches_api_unchanged(hass, entry, client):
+    await setup(hass, entry)
+    with patch.object(entry.runtime_data.client, "command", new=AsyncMock(return_value={})) as send:
+        await hass.services.async_call(
+            DOMAIN,
+            "complete_task",
+            {
+                "config_entry_id": entry.entry_id,
+                "command_id": "00000000-0000-4000-8000-000000000123",
+                "expected_revision": 7,
+                "task_id": "task",
+                "task_revision": 0,
+                "result": {},
+            },
+            blocking=True,
+            return_response=True,
+        )
+        assert send.call_args.args[1]["task_revision"] == 0
