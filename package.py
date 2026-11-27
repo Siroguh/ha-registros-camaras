@@ -7,6 +7,7 @@ target = root / "dist" / "registros_camaras.zip"
 target.parent.mkdir(exist_ok=True)
 with ZipFile(target, "w", compression=ZIP_DEFLATED) as archive:
     archive.write(root / "LICENSE", "custom_components/registros_camaras/LICENSE")
+    archive.write(root / "NOTICE", "custom_components/registros_camaras/NOTICE")
     for path in sorted(source.rglob("*")):
         if path.is_file() and path.suffix in {".py", ".json", ".png", ".svg", ".yaml"}:
             archive.write(path, path.relative_to(root))

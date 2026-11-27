@@ -1,128 +1,201 @@
-create_lot:
-  name: Crear lote
-  description: Crea un lote mediante la API, incluida su entrada inicial según las reglas del servidor.
+get_snapshot:
+  name: Consultar centro
+  description: Estado autoritativo versionado, cámaras y tareas pendientes. Devuelve status pending mientras se reconcilia.
   fields:
-    entry_id:
+    config_entry_id: &entry
+      name: Conexión
       required: true
       selector:
         config_entry:
           integration: registros_camaras
-    payload:
-      required: true
-      description: "Objeto API: codigo, cantidad, iniciadoEn (ISO con zona), zonaHoraria."
-      selector:
-        object:
-register_movement:
-  name: Registrar movimiento
-  description: Registra un traslado completo o reparto con fecha y procedencias.
+get_lots:
+  name: Consultar lotes
+  description: Página de inventario. Continuar con nextBefore como before hasta null.
   fields:
-    entry_id:
-      required: true
+    config_entry_id: *entry
+    before:
       selector:
-        config_entry:
-          integration: registros_camaras
-    lot_id:
+        number: {min: 1, mode: box}
+    search:
+      selector:
+        text:
+    limit:
+      default: 50
+      selector:
+        select:
+          options: ["50", "100"]
+get_movement_options:
+  name: Consultar disponibilidad para movimiento
+  fields:
+    config_entry_id: *entry
+    lot_id: &lot
+      name: ID del lote
       required: true
       selector:
         text:
-    payload:
-      required: true
-      description: "Objeto API: id UUID, revision del lote, fecha, ubicacionOrigenId, destinos y mezclarOrigen opcional."
-      selector:
-        object:
-set_manual:
-  name: Establecer consigna manual
-  description: Crea una excepción temporal con fin obligatorio, validada por la API.
-  fields:
-    entry_id:
-      required: true
-      selector:
-        config_entry:
-          integration: registros_camaras
-    location_id:
+    occurred_on: &day
+      name: Día efectivo
       required: true
       selector:
         text:
-    payload:
-      required: true
-      description: "Objeto API: id UUID, revision 0, zonaHoraria, vigenteDesde, vigenteHasta, temperaturaMin, temperaturaMax, humedadMin, humedadMax y motivo opcional."
+    correcting:
       selector:
-        object:
-confirm_change:
-  name: Confirmar propuesta automática
-  description: Confirma exclusivamente el identificador de propuesta revisado. Rechaza propuestas obsoletas.
+        text:
+confirm_proposal:
+  name: Confirmar propuesta exacta
+  description: Usa el ID de propuesta y la revisión que se mostraron al usuario. Un conflicto requiere revisar los datos nuevos.
   fields:
-    entry_id:
+    config_entry_id: *entry
+    command_id: &command
+      name: ID de comando (UUID)
+      description: Generar una vez y conservarlo junto al contenido para todos los reintentos.
       required: true
       selector:
-        config_entry:
-          integration: registros_camaras
+        text:
+    expected_revision: &revision
+      name: Revisión observada del centro
+      required: true
+      selector:
+        number: {min: 0, mode: box}
     location_id:
       required: true
       selector:
         text:
     proposal_id:
       required: true
-      description: Identificador del atributo pending.id del indicador de cambio pendiente.
       selector:
         text:
-update_manual:
-  name: Editar manual
+complete_task:
+  name: Registrar resultado de tarea
+  description: Resultado tipado. Completar remove_product no mueve existencias.
   fields:
-    entry_id:
-      required: true
-      selector:
-        config_entry:
-          integration: registros_camaras
-    location_id:
-      required: true
-      selector:
-        text:
-    manual_id:
+    config_entry_id: *entry
+    command_id: *command
+    expected_revision: *revision
+    task_id:
       required: true
       selector:
         text:
-    payload:
+    task_revision:
+      required: true
+      selector:
+        number: {min: 1, mode: box}
+    result:
       required: true
       selector:
         object:
-finish_manual:
-  name: Finalizar manual
+create_lot:
+  name: Crear lote
   fields:
-    entry_id:
-      required: true
-      selector:
-        config_entry:
-          integration: registros_camaras
-    location_id:
-      required: true
-      selector:
-        text:
-    manual_id:
+    config_entry_id: *entry
+    command_id: *command
+    expected_revision: *revision
+    code:
       required: true
       selector:
         text:
-    payload:
+    quantity:
+      required: true
+      selector:
+        number: {min: 1, mode: box}
+    started_on: *day
+create_movement:
+  name: Registrar movimiento
+  description: Destinos con locationId, quantity y contributions opcionales. La API valida disponibilidad y procedencia.
+  fields: &movement_fields
+    config_entry_id: *entry
+    command_id: *command
+    expected_revision: *revision
+    lot_id: *lot
+    occurred_on: *day
+    source_location_id:
+      required: true
+      selector:
+        text:
+    destinations:
       required: true
       selector:
         object:
-update_movement:
-  name: Corregir movimiento
-  fields:
-    entry_id:
-      required: true
+    mix_sources:
+      default: false
       selector:
-        config_entry:
-          integration: registros_camaras
-    lot_id:
-      required: true
+        boolean:
+    notes:
       selector:
         text:
+get_lot:
+  name: Consultar ficha del lote
+  fields:
+    config_entry_id: *entry
+    lot_id: *lot
+get_movement_history:
+  name: Consultar historial de movimientos
+  fields:
+    config_entry_id: *entry
+    lot_id: *lot
+correct_movement:
+  name: Corregir movimiento con auditoría
+  fields:
+    <<: *movement_fields
     movement_id:
       required: true
       selector:
         text:
-    payload:
+    reason:
+      required: true
+      selector:
+        text:
+schedule_manual:
+  name: Establecer consigna manual
+  fields: &manual_fields
+    config_entry_id: *entry
+    command_id: *command
+    expected_revision: *revision
+    location_id:
+      required: true
+      selector:
+        text:
+    reason:
+      required: true
+      selector:
+        text:
+    limits:
       required: true
       selector:
         object:
+    starts_at:
+      description: Instante Unix en milisegundos.
+      required: true
+      selector:
+        number: {min: 0, mode: box}
+    ends_at:
+      description: Instante Unix en milisegundos.
+      required: true
+      selector:
+        number: {min: 0, mode: box}
+replace_manual:
+  name: Sustituir consigna manual
+  fields:
+    <<: *manual_fields
+    manual_id:
+      required: true
+      selector:
+        text:
+finish_manual:
+  name: Finalizar consigna manual
+  fields:
+    config_entry_id: *entry
+    command_id: *command
+    expected_revision: *revision
+    location_id:
+      required: true
+      selector:
+        text:
+    manual_id:
+      required: true
+      selector:
+        text:
+    reason:
+      required: true
+      selector:
+        text:

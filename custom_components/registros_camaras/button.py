@@ -1,34 +1,24 @@
+"""Refresh action; business confirmations require explicit IDs and revisions."""
+
 from homeassistant.components.button import ButtonEntity
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.const import EntityCategory
 
-from .api import ApiError
-from .entity import CameraEntity, add_cameras
-
-PARALLEL_UPDATES = 0
+from .entity import RegistrosEntity
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    add_cameras(
-        entry,
-        async_add_entities,
-        lambda camera: [
-            ConfirmButton(entry.runtime_data, camera, "confirm", "Confirmar cambio pendiente")
-        ],
-    )
+    async_add_entities([RefreshButton(entry.runtime_data)])
 
 
-class ConfirmButton(CameraEntity, ButtonEntity):
+class RefreshButton(RegistrosEntity, ButtonEntity):
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator, "refresh")
+
     @property
     def available(self):
-        return super().available and bool(self.camera.get("pendiente"))
+        return True
 
     async def async_press(self):
-        pending = (self.camera or {}).get("pendiente")
-        if not pending:
-            raise HomeAssistantError("No hay propuesta pendiente")
-        try:
-            await self.coordinator.async_operation(
-                "confirm_change", {"location_id": self.location_id, "proposal_id": pending["id"]}
-            )
-        except ApiError as err:
-            raise HomeAssistantError(str(err)) from err
+        await self.coordinator.async_request_refresh()

@@ -1,211 +1,252 @@
+"""Async client for the versioned Registros Cámaras 2 API. No HA dependencies."""
+
+import asyncio
 from dataclasses import dataclass
+import json
 import re
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlsplit, urlunsplit
 
-from aiohttp import ClientError, ClientSession, ClientTimeout
-from yarl import URL
+import aiohttp
 
 
 class ApiError(Exception):
-    pass
+    """A safe error, never containing credentials or server response bodies."""
 
 
 class AuthenticationError(ApiError):
-    pass
+    """The application rejected the API key."""
 
 
 class CannotConnect(ApiError):
-    pass
+    """Unavailable server or unknown command outcome."""
 
 
 class IncompatibleApi(ApiError):
-    pass
+    """The server does not implement our contract."""
 
 
-class RequestError(ApiError):
-    pass
+class Conflict(ApiError):
+    """Refresh and review the new revision before issuing a new command."""
+
+
+class Rejected(ApiError):
+    """The server rejected the operation."""
 
 
 def normalize_url(value: str) -> str:
-    url = URL(value.strip())
+    """Accept a server root, never embedded credentials, queries or fragments."""
+    parts = urlsplit(value.strip())
     if (
-        url.scheme not in {"http", "https"}
-        or not url.host
-        or url.user is not None
-        or url.password is not None
-        or url.query_string
-        or url.fragment
-        or url.path not in {"", "/"}
+        parts.scheme not in {"http", "https"}
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or parts.path not in {"", "/"}
     ):
-        raise ValueError("Use the application origin without credentials or a path")
-    return str(url).rstrip("/")
+        raise ValueError("Use the HTTP(S) server root")
+    _ = parts.port
+    return urlunsplit((parts.scheme, parts.netloc.lower(), "", "", ""))
 
 
-@dataclass(frozen=True, slots=True)
-class IntegrationStatus:
-    name: str
-    account_id: str
-    api_version: int
-    capabilities: tuple[str, ...]
-    notification_scope: str | None = None
+def segment(value: str) -> str:
+    return quote(value, safe="")
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """A single authoritative centre revision; pending reads are not empty stock."""
+
+    raw: dict[str, Any]
+
+    @property
+    def ready(self) -> bool:
+        return self.raw["status"] == "ready"
+
+    @property
+    def revision(self) -> int:
+        return self.raw["revision"]
+
+    @property
+    def locations(self) -> dict[str, dict[str, Any]]:
+        return {v["id"]: v for v in self.raw["locations"] if v["kind"] != "terminal"}
+
+    @property
+    def chambers(self) -> dict[str, dict[str, Any]]:
+        return {v["locationId"]: v for v in self.raw["chambers"]}
+
+    @property
+    def tasks(self) -> list[dict[str, Any]]:
+        return self.raw["tasks"]
+
+
+def decode_snapshot(value: Any, centre_id: str) -> Snapshot:
+    """Fail closed on malformed snapshots rather than publish plausible zeroes."""
+    try:
+        assert value["apiVersion"] == 1
+        assert value["centreId"] == centre_id
+        assert value["status"] in {"ready", "pending"}
+        for key in ("revision", "planRevision"):
+            assert type(value[key]) is int and value[key] >= 0
+        assert isinstance(value["sampledAt"], str)
+        for key in ("locations", "chambers", "tasks"):
+            assert isinstance(value[key], list)
+        for loc in value["locations"]:
+            assert isinstance(loc["id"], str) and isinstance(loc["name"], str)
+            assert loc["centreId"] == centre_id
+            assert loc["kind"] in {"chamber", "storage", "terminal"}
+            assert type(loc["archived"]) is bool
+        for chamber in value["chambers"]:
+            assert isinstance(chamber["locationId"], str)
+            assert chamber["status"] in {"empty", "no_plan", "no_phase", "compatible", "conflict"}
+            assert isinstance(chamber.get("occupants", []), list)
+            for occupant in chamber.get("occupants", []):
+                assert isinstance(occupant["lotId"], str)
+                assert type(occupant["quantity"]) is int and occupant["quantity"] >= 0
+            for key in ("effective", "ideal", "automatic"):
+                _validate_limits(chamber[key])
+            if chamber["manual"] is not None:
+                _validate_limits(chamber["manual"]["limits"])
+            if (proposal := chamber["proposal"]) is not None:
+                assert isinstance(proposal["id"], str)
+                assert type(proposal["overdue"]) is bool
+                assert isinstance(proposal["dueAt"], (int, float))
+                _validate_limits(proposal["limits"])
+        for task in value["tasks"]:
+            assert isinstance(task["id"], str) and isinstance(task["lotId"], str)
+            assert task["status"] in {"pending", "due"}
+            assert type(task["revision"]) is int
+            assert isinstance(task["dueAt"], (int, float))
+            assert task["step"]["kind"] in {"curing_review", "quality_check", "remove_product"}
+        return Snapshot(value)
+    except (AssertionError, KeyError, TypeError, ValueError) as err:
+        raise IncompatibleApi("Invalid integration snapshot") from err
+
+
+def _validate_limits(limits: Any) -> None:
+    if limits is None:
+        return
+    for metric in ("temperature", "humidity"):
+        bounds = limits[metric]
+        assert type(bounds["min"]) in (int, float)
+        assert type(bounds["max"]) in (int, float)
+        assert bounds["min"] <= bounds["max"]
+
+
+MOVEMENT_ERRORS = {
+    "before_entry": "La fecha precede a la entrada inicial del lote.",
+    "insufficient_stock": "No hay existencias suficientes en la fecha seleccionada.",
+    "ambiguous_sources": "Selecciona las procedencias o activa la mezcla de origen.",
+    "invalid_contributions": "Revisa las cantidades y procedencias del reparto.",
+    "invalid_distribution": "Revisa las cantidades y destinos del reparto.",
+    "immutable_entry": "La entrada inicial se corrige desde la ficha del lote.",
+    "archived_destination": "El destino está archivado.",
+}
 
 
 class RegistrosClient:
-    def __init__(self, session: ClientSession, base_url: str, api_key: str) -> None:
-        self._session = session
-        self.base_url = normalize_url(base_url)
-        self._api_key = api_key.strip()
+    def __init__(self, session: aiohttp.ClientSession, url: str, key: str, centre_id: str) -> None:
+        self.session = session
+        self.url = normalize_url(url)
+        self._key = key.strip()
+        if not re.fullmatch(r"[a-z0-9-]{1,100}", centre_id):
+            raise ValueError("Invalid centre")
+        self.centre_id = centre_id
 
-    async def _request(self, method: str, path: str, payload: dict | None = None) -> Any:
+    async def request(
+        self, method: str, path: str, body: dict | None = None, params: dict | None = None
+    ) -> dict:
         try:
-            async with self._session.request(
-                method,
-                f"{self.base_url}/api/v1/{path}",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Accept": "application/json",
-                },
-                timeout=ClientTimeout(total=10),
-                allow_redirects=False,
-                raise_for_status=False,
-                json=payload,
-            ) as response:
-                if response.status in {401, 403}:
-                    raise AuthenticationError("Invalid, revoked or unauthorized API key")
-                if response.status == 404 and path.startswith("integration/"):
-                    raise IncompatibleApi("Actualiza el servidor: falta el endpoint de integración")
-                if response.status in {400, 404, 409, 422}:
-                    data = await response.json()
-                    error = data.get("error") if isinstance(data, dict) else None
-                    message = error.get("message") if isinstance(error, dict) else None
-                    message = message or "Operación rechazada por la API"
-                    raise RequestError(str(message))
-                if response.status not in {200, 201}:
-                    raise CannotConnect(f"API returned HTTP {response.status}")
-                return await response.json()
-        except (ClientError, TimeoutError) as err:
-            raise CannotConnect("Unable to reach the application API") from err
-        except ValueError as err:
-            raise IncompatibleApi("The application did not return valid JSON") from err
+            async with asyncio.timeout(30):
+                async with self.session.request(
+                    method,
+                    f"{self.url}/api/{path}",
+                    headers={"Authorization": f"Bearer {self._key}", "Accept": "application/json"},
+                    json=body,
+                    params=params,
+                    allow_redirects=False,
+                ) as response:
+                    if response.status in {401, 403}:
+                        raise AuthenticationError("API key rejected")
+                    if response.status == 409:
+                        try:
+                            error = json.loads(await response.content.read(65536))
+                        except ValueError, UnicodeError:
+                            error = {}
+                        if isinstance(error, dict) and error.get("_tag") == "MovementRejected":
+                            raise Rejected(
+                                MOVEMENT_ERRORS.get(
+                                    error.get("code"), "Movimiento rechazado; revisa los datos."
+                                )
+                            )
+                        raise Conflict("Revision changed; refresh and review")
+                    if response.status in {404, 405}:
+                        raise IncompatibleApi("Endpoint, centre or resource not found")
+                    if response.status == 429 or response.status >= 500:
+                        raise CannotConnect("Server unavailable; retry commands with the same ID")
+                    if not 200 <= response.status < 300:
+                        raise Rejected("Operation rejected")
+                    payload = bytearray()
+                    async for chunk in response.content.iter_chunked(65536):
+                        payload.extend(chunk)
+                        if len(payload) > 8 * 1024 * 1024:
+                            raise IncompatibleApi("Response too large")
+                    result = json.loads(payload)
+                    if not isinstance(result, dict):
+                        raise IncompatibleApi("Expected an object")
+                    return result
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise CannotConnect("Connection failed; retry commands with the same ID") from err
+        except (ValueError, UnicodeError) as err:
+            raise IncompatibleApi("Invalid JSON response") from err
 
-    async def async_get_status(self) -> IntegrationStatus:
-        data = await self._request("GET", "integration/status")
-        if (
-            not isinstance(data, dict)
-            or data.get("application") != "registros_camaras"
-            or type(data.get("apiVersion")) is not int
-            or data["apiVersion"] != 1
-            or data.get("status") != "ok"
-            or not isinstance(data.get("name"), str)
-            or not data["name"]
-            or not isinstance(data.get("accountId"), str)
-            or not data["accountId"]
-            or not isinstance(data.get("capabilities"), list)
-            or not all(isinstance(item, str) for item in data["capabilities"])
-            or "connection:read" not in data["capabilities"]
-            or (
-                data.get("notificationScope") is not None
-                and (
-                    not isinstance(data["notificationScope"], str)
-                    or not re.fullmatch(r"[a-f0-9]{16}", data["notificationScope"])
+    async def snapshot(self) -> Snapshot:
+        return decode_snapshot(
+            await self.request("GET", f"integration/{self.centre_id}"), self.centre_id
+        )
+
+    async def command(self, action: str, data: dict) -> dict:
+        """IDs and revisions come from the caller, so retries remain durable across HA restarts."""
+        body = {"commandId": data["command_id"], "expectedRevision": data["expected_revision"]}
+        plans_path = f"centres/{self.centre_id}/plans"
+        lots_path = f"production/{self.centre_id}/lots"
+        if action == "confirm_proposal":
+            path = plans_path
+            body["action"] = {
+                "kind": "confirm",
+                "locationId": data["location_id"],
+                "proposalId": data["proposal_id"],
+            }
+        elif action == "complete_task":
+            path = f"centres/{self.centre_id}/tasks/{segment(data['task_id'])}/completions"
+            body.update(expectedTaskRevision=data["task_revision"], result=data["result"])
+        elif action == "create_lot":
+            path = lots_path
+            body.update(code=data["code"], quantity=data["quantity"], startedOn=data["started_on"])
+        elif action in {"schedule_manual", "replace_manual", "finish_manual"}:
+            path = plans_path
+            change = {"kind": action, "locationId": data["location_id"], "reason": data["reason"]}
+            if action != "schedule_manual":
+                change["manualId"] = data["manual_id"]
+            if action != "finish_manual":
+                change.update(
+                    limits=data["limits"], startsAt=data["starts_at"], endsAt=data["ends_at"]
                 )
+            body["action"] = change
+        elif action in {"create_movement", "correct_movement"}:
+            path = f"{lots_path}/{segment(data['lot_id'])}/movements"
+            body.update(
+                occurredOn=data["occurred_on"],
+                sourceLocationId=data["source_location_id"],
+                destinations=data["destinations"],
+                mixSources=data.get("mix_sources", False),
+                notes=data.get("notes", ""),
             )
-        ):
-            raise IncompatibleApi("Unsupported application API contract")
-        return IntegrationStatus(
-            name=data["name"],
-            account_id=data["accountId"],
-            api_version=data["apiVersion"],
-            capabilities=tuple(data["capabilities"]),
-            notification_scope=data.get("notificationScope"),
-        )
-
-    async def async_notification_action(self, occurrence: str, action_id: str, action: str) -> dict:
-        return await self._request(
-            "POST",
-            f"notifications/{quote(occurrence, safe='')}/actions",
-            {"id": action_id, "action": action},
-        )
-
-    async def async_dashboard(self) -> dict:
-        data = await self._request("GET", "integration/dashboard")
-        if (
-            not isinstance(data, dict)
-            or not isinstance(data.get("camaras"), list)
-            or not isinstance(data.get("ubicaciones"), list)
-        ):
-            raise IncompatibleApi("Actualiza el servidor: falta el contrato de controles")
-        for camera in data["camaras"]:
-            if not isinstance(camera, dict) or not all(
-                key in camera
-                for key in (
-                    "ubicacionId",
-                    "nombre",
-                    "consigna",
-                    "pendiente",
-                    "origen",
-                    "lotes",
-                    "manualHasta",
-                )
-            ):
-                raise IncompatibleApi("Respuesta de cámara incompatible")
-        return data
-
-    async def async_operation(self, operation: str, data: dict) -> dict:
-        location = quote(str(data.get("location_id", "")), safe="")
-        lot = quote(str(data.get("lot_id", "")), safe="")
-        movement = quote(str(data.get("movement_id", "")), safe="")
-        manual = quote(str(data.get("manual_id", "")), safe="")
-        match operation:
-            case "lots":
-                query = urlencode(
-                    {
-                        "offset": data.get("offset", 0),
-                        "limit": 100,
-                        "buscar": data.get("search", ""),
-                    }
-                )
-                return await self._request("GET", f"lotes?{query}")
-            case "movement_options":
-                params = {"fecha": data.get("date", "")}
-                if data.get("movement_id"):
-                    params["movimientoId"] = data["movement_id"]
-                query = urlencode(params)
-                return await self._request("GET", f"lotes/{lot}/opciones-movimiento?{query}")
-            case "movements":
-                return await self._request("GET", f"lotes/{lot}/movimientos")
-            case "update_movement":
-                return await self._request(
-                    "PUT", f"lotes/{lot}/movimientos/{movement}", data.get("payload", {})
-                )
-            case "manuals":
-                return await self._request("GET", f"ubicaciones/{location}/consignas")
-            case "update_manual":
-                return await self._request(
-                    "PUT", f"ubicaciones/{location}/consignas/{manual}", data.get("payload", {})
-                )
-            case "finish_manual":
-                return await self._request(
-                    "POST",
-                    f"ubicaciones/{location}/consignas/{manual}/finalizar",
-                    data.get("payload", {}),
-                )
-            case "create_lot":
-                return await self._request("POST", "lotes", data.get("payload", {}))
-            case "register_movement":
-                return await self._request(
-                    "POST", f"lotes/{lot}/movimientos", data.get("payload", {})
-                )
-            case "set_manual":
-                return await self._request(
-                    "POST", f"ubicaciones/{location}/consignas", data.get("payload", {})
-                )
-            case "confirm_change":
-                return await self._request(
-                    "POST",
-                    f"ubicaciones/{location}/confirmacion",
-                    {"propuestaId": data.get("proposal_id")},
-                )
-            case _:
-                raise RequestError("Operación no disponible")
+            if action == "correct_movement":
+                path += f"/{segment(data['movement_id'])}/corrections"
+                body["reason"] = data["reason"]
+        else:
+            raise Rejected("Unknown action")
+        return await self.request("POST", path, body)

@@ -1,14 +1,14 @@
-from homeassistant.core import HomeAssistant
-
-from .coordinator import RegistrosConfigEntry
+"""Minimal allowlisted diagnostics; never serialize entry data or client objects."""
 
 
-async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: RegistrosConfigEntry
-) -> dict[str, object]:
+async def async_get_config_entry_diagnostics(hass, entry):
     coordinator = entry.runtime_data
     return {
-        "connected": coordinator.last_update_success,
-        "api_version": coordinator.data.api_version,
-        "capabilities": list(coordinator.data.capabilities),
+        "entry_version": entry.version,
+        "last_update_success": coordinator.last_update_success,
+        "api_version": coordinator.data.raw["apiVersion"],
+        "synchronization": coordinator.data.raw["status"],
+        "revision": coordinator.data.revision,
+        "chambers": len(coordinator.data.locations),
+        "outstanding_tasks": len(coordinator.data.tasks),
     }

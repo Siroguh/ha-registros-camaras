@@ -2,53 +2,24 @@
   "title": "Registros Cámaras",
   "config": {
     "step": {
-      "user": {
-        "title": "Conectar Registros Cámaras",
-        "description": "Crea una clave de integración en la página Home Assistant de la aplicación. Esta integración es un cliente de su API.",
-        "data": { "url": "URL de la aplicación", "api_key": "Clave de integración" },
-        "data_description": {
-          "url": "Origen de la aplicación, con http:// o https:// y su puerto, sin /api ni ruta de página. Debe ser accesible desde Home Assistant.",
-          "api_key": "La clave rc_ emitida por esta aplicación, no un token de Home Assistant."
-        }
-      },
-      "reauth_confirm": {
-        "title": "Sustituir clave de integración",
-        "description": "Crea una clave nueva en la aplicación con la misma cuenta.",
-        "data": { "api_key": "Nueva clave de integración" },
-        "data_description": { "api_key": "La nueva clave rc_ emitida por esta aplicación." }
-      },
-      "reconfigure": {
-        "title": "Cambiar conexión",
-        "description": "Conecta con la misma cuenta de la aplicación usando otra dirección o clave.",
-        "data": {
-          "url": "URL de la aplicación",
-          "api_key": "Nueva clave de integración (opcional)"
-        },
-        "data_description": {
-          "url": "Origen de la aplicación accesible desde Home Assistant, sin ruta de página.",
-          "api_key": "Déjala vacía para mantener la clave actual."
-        }
-      }
+      "user": {"title": "Conectar Registros Cámaras 2", "description": "Introduce la URL de la aplicación y una clave API nativa creada en Cuenta. El servidor debe ofrecer la API de integración v1.", "data": {"url": "URL de la aplicación", "centre_id": "Identificador del centro", "api_key": "Clave API"}},
+      "reauth_confirm": {"title": "Actualizar credenciales", "description": "Introduce una clave API nativa de la nueva aplicación. Si actualizas desde la integración antigua, introduce también la URL nueva.", "data": {"url": "URL de la aplicación", "api_key": "Clave API"}},
+      "reconfigure": {"title": "Actualizar conexión", "description": "Conserva el mismo centro. Deja la clave vacía para mantenerla.", "data": {"url": "URL de la aplicación", "api_key": "Clave API (opcional)"}}
     },
-    "error": {
-      "invalid_url": "Introduce un origen HTTP o HTTPS sin ruta, parámetros ni credenciales en la URL.",
-      "invalid_auth": "La clave de integración no es válida, está revocada o no tiene acceso.",
-      "cannot_connect": "No se puede conectar. Revisa la dirección, el certificado y el acceso de red desde Home Assistant.",
-      "incompatible_api": "El servidor no admite la versión necesaria de la API de Registros Cámaras."
+    "error": {"invalid_address": "Introduce un origen HTTP(S) y un identificador de centro válido.", "invalid_auth": "La clave API no es válida o está revocada.", "cannot_connect": "No se puede conectar con la aplicación.", "incompatible_api": "El servidor, centro o versión de API no es compatible."},
+    "abort": {"already_configured": "Este servidor y centro ya están configurados.", "reauth_successful": "Conexión actualizada.", "reconfigure_successful": "Conexión actualizada."}
+  },
+  "entity": {
+    "sensor": {
+      "setpoint_source": {"name": "Origen de consigna"}, "manual_end": {"name": "Fin de consigna manual"},
+      "quantity": {"name": "Cantidad"}, "lots": {"name": "Lotes"},
+      "plan_status": {"name": "Estado del plan", "state": {"empty": "Vacía", "no_plan": "Sin plan", "no_phase": "Sin fase", "compatible": "Compatible", "conflict": "Conflicto"}},
+      "temperature_min": {"name": "Consigna mínima de temperatura"}, "temperature_max": {"name": "Consigna máxima de temperatura"},
+      "humidity_min": {"name": "Consigna mínima de humedad"}, "humidity_max": {"name": "Consigna máxima de humedad"},
+      "proposal": {"name": "Propuesta", "state": {"none": "Ninguna", "pending": "Pendiente"}},
+      "pending_tasks": {"name": "Tareas pendientes"}, "due_tasks": {"name": "Tareas vencidas"}
     },
-    "abort": {
-      "already_configured": "Esta cuenta de la aplicación ya está configurada.",
-      "unique_id_mismatch": "La conexión corresponde a otra cuenta de la aplicación."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Notificaciones de cambios pendientes",
-        "description": "Selecciona un servicio mobile_app para notificaciones accionables, o un aviso dentro de Home Assistant. La API valida cada confirmación.",
-        "data": { "notify_service": "Servicio de notificación" }
-      }
-    }
-  },
-  "entity": { "binary_sensor": { "connection": { "name": "Conexión" } } }
+    "binary_sensor": {"connection": {"name": "Conexión"}, "proposal_pending": {"name": "Propuesta pendiente"}, "proposal_overdue": {"name": "Propuesta vencida"}, "conflict": {"name": "Conflicto de plan"}, "manual_active": {"name": "Consigna manual activa"}},
+    "button": {"refresh": {"name": "Actualizar"}}
+  }
 }
