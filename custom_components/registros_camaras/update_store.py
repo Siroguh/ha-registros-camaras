@@ -21,6 +21,10 @@ def incomplete_history(row: dict) -> bool:
     return row["mode"] == "history" and row["status"] == "valid" and not row["unit"]
 
 
+class IncompleteHistoryFull(HomeAssistantError):
+    """The incomplete-history reserve cannot accept this recovery window."""
+
+
 def identity(source: str, row: dict) -> tuple[str, str, str]:
     return source, row["assignmentId"], row["sourceEventId"]
 
@@ -267,7 +271,7 @@ class UpdateStore:
             # larger pre-upgrade reserve, but never grow it or advance a failed cursor.
             prior_incomplete = sum(incomplete_history(row) for _, row in self.data["rows"])
             if incomplete > max(MAX_INCOMPLETE_REPORTS, prior_incomplete):
-                raise HomeAssistantError("Incomplete sensor history capacity reached")
+                raise IncompleteHistoryFull("Incomplete sensor history capacity reached")
             cursors = {**self.data["cursors"]}
             if cursor:
                 cursors[cursor[0]] = max(cursors.get(cursor[0], 0), cursor[1])

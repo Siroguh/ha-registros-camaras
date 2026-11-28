@@ -22,7 +22,7 @@ from homeassistant.helpers.event import (
 
 from .api import CannotConnect, IncompatibleApi, RegistrosClient, normalize_url
 from .const import CONF_CENTRE_ID, DOMAIN
-from .update_store import MAX_REPORTS, MEMORY_REPORTS, UpdateStore
+from .update_store import MAX_REPORTS, MEMORY_REPORTS, IncompleteHistoryFull, UpdateStore
 
 if TYPE_CHECKING:
     from .coordinator import RegistrosConfigEntry
@@ -317,6 +317,7 @@ class Updates:
         async with asyncio.timeout(30):
             await committed
         more = False
+        self.recovery_error = None
         if await self.spool.deliverable_size() >= MAX_REPORTS:
             return False
         for assignment in self.assignments:
@@ -329,7 +330,6 @@ class Updates:
             end = min(target, start + 300000)
             if end <= start:
                 continue
-            more = more or end < target
             groups = await recorder.async_add_executor_job(
                 lambda a=assignment, s=start, e=end: get_significant_states(
                     self.hass,
@@ -354,10 +354,14 @@ class Updates:
                 if occurrence:
                     row["sourceEventId"] += f":occurrence:{occurrence}"
                 rows.append((assignment["source"], row))
-            await self.spool.append(rows, (assignment["id"], end))
+            try:
+                await self.spool.append(rows, (assignment["id"], end))
+            except IncompleteHistoryFull:
+                self.recovery_error = "Incomplete sensor history capacity reached; window pending"
+                continue
+            more = more or end < target
             if rows:
                 self.send_ready.set()
-        self.recovery_error = None
         return more
 
     async def reconcile_loop(self) -> None:

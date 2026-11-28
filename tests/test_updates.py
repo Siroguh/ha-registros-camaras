@@ -1061,8 +1061,6 @@ async def test_real_recorder_incomplete_reserve_never_pauses_live_capture(
     stream_manifest,
     restored_limit,
 ):
-    from homeassistant.exceptions import HomeAssistantError
-
     await async_setup_recorder_instance(
         hass,
         {
@@ -1107,17 +1105,21 @@ async def test_real_recorder_incomplete_reserve_never_pauses_live_capture(
     ):
         clock.now.return_value = at + timedelta(seconds=20)
         clock.fromtimestamp.side_effect = datetime.fromtimestamp
-        with pytest.raises(HomeAssistantError, match="Incomplete sensor history capacity"):
-            await updates.recover()
+        assert not await updates.recover()
+        assert "capacity" in updates.recovery_error
     assert await updates.spool.cursor(ASSIGNMENT["id"], 0) == cursor
     sent = asyncio.Event()
     original_wait = Updates.wait
+    original_acknowledge = UpdateStore.acknowledge
 
     async def wait(instance, seconds):
         await original_wait(instance, 0 if seconds == 2 else seconds)
 
     async def push(batch):
         assert [row["value"] for row in batch["readings"]] == [23]
+
+    async def acknowledge(store, command_id):
+        await original_acknowledge(store, command_id)
         sent.set()
 
     with (
@@ -1129,6 +1131,7 @@ async def test_real_recorder_incomplete_reserve_never_pauses_live_capture(
         ),
         patch.object(Updates, "wait", wait),
         patch.object(RegistrosClient, "push_updates", side_effect=push),
+        patch.object(UpdateStore, "acknowledge", acknowledge),
     ):
         assert await hass.config_entries.async_setup(entry.entry_id)
         restored = entry.runtime_data.updates
@@ -1169,3 +1172,43 @@ async def test_incomplete_history_does_not_block_other_reports_or_weaken_conflic
     assert batch["readings"] == [sample()]
     await restored.append([(ASSIGNMENT["source"], {**sample(), "mode": "history", "unit": ""})])
     assert await restored.next_batch("centre") == batch
+
+
+async def test_real_recorder_incomplete_window_does_not_starve_other_assignments(
+    recorder_db_url, hass, entry, async_setup_recorder_instance, tmp_path, real_storage
+):
+    await async_setup_recorder_instance(
+        hass, {"db_url": f"sqlite:///{tmp_path / 'recorder.db'}", "commit_interval": 60}
+    )
+    other = {**ASSIGNMENT, "id": "temperature-2", "entityId": "sensor.other"}
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.assignments = [ASSIGNMENT, other]
+    at = datetime.now(UTC)
+    for value in (20, 21):
+        hass.states.async_set(
+            ASSIGNMENT["entityId"], str(value), {"unit_of_measurement": "°C", "large": "x" * 17000}
+        )
+        await hass.async_block_till_done()
+    hass.states.async_set(other["entityId"], "23", {"unit_of_measurement": "°C"})
+    await hass.async_block_till_done()
+    initial = int(at.timestamp() * 1000) - 1000
+    for assignment in updates.assignments:
+        await updates.spool.ensure_cursor(assignment["id"], initial)
+    with (
+        patch("custom_components.registros_camaras.update_store.MAX_INCOMPLETE_REPORTS", 1),
+        patch("custom_components.registros_camaras.updates.datetime") as clock,
+    ):
+        clock.now.return_value = at + timedelta(seconds=20)
+        clock.fromtimestamp.side_effect = datetime.fromtimestamp
+        for _ in range(2):
+            assert not await updates.recover()
+            assert "capacity" in updates.recovery_error
+    restored = UpdateStore(hass, entry.entry_id)
+    await restored.initialize()
+    assert await restored.cursor(ASSIGNMENT["id"], 0) == initial
+    assert await restored.cursor(other["id"], 0) == int(
+        (at + timedelta(seconds=10)).timestamp() * 1000
+    )
+    batch = await restored.next_batch("centre")
+    assert [(row["assignmentId"], row["value"]) for row in batch["readings"]] == [(other["id"], 23)]
