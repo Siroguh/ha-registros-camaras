@@ -348,6 +348,64 @@ async def test_unload_flushes_pending_reports_for_restart(hass, entry):
     assert await updates.spool.size() == 1
 
 
+async def test_failed_unload_retries_flush_on_homeassistant_shutdown(
+    hass, entry, client, stream_manifest, real_storage
+):
+    from homeassistant.exceptions import HomeAssistantError
+
+    hass.config.external_url = ASSIGNMENT["source"]
+    stream_manifest.return_value["assignments"] = [ASSIGNMENT]
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    updates = entry.runtime_data.updates
+    with patch.object(
+        updates.spool, "append", side_effect=HomeAssistantError("temporary disk failure")
+    ):
+        hass.states.async_set(ASSIGNMENT["entityId"], "20", {"unit_of_measurement": "°C"})
+        await hass.async_block_till_done()
+        assert not await hass.config_entries.async_unload(entry.entry_id)
+        assert len(updates.pending) == 1
+    await hass.async_stop()
+    restored = UpdateStore(hass, entry.entry_id)
+    await restored.initialize()
+    assert await restored.size() == 1
+    assert (await restored.next_batch("centre"))["readings"][0]["value"] == 20
+
+
+@pytest.mark.parametrize("offline", [False, True])
+async def test_missing_cache_recovers_online_without_changing_pending_batch(
+    hass, entry, client, stream_manifest, real_storage, offline
+):
+    hass.config.external_url = ASSIGNMENT["source"]
+    stream_manifest.return_value["assignments"] = [ASSIGNMENT]
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    updates = entry.runtime_data.updates
+    hass.states.async_set(ASSIGNMENT["entityId"], "20", {"unit_of_measurement": "°C"})
+    await hass.async_block_till_done()
+    batch = await updates.spool.next_batch("centre")
+    cursors = dict(updates.spool.data["cursors"])
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await updates.spool.make_store(updates.spool.cache_key).async_remove()
+    if offline:
+        client.side_effect = CannotConnect()
+        stream_manifest.side_effect = CannotConnect()
+        assert not await hass.config_entries.async_setup(entry.entry_id)
+        hass.states.async_set(ASSIGNMENT["entityId"], "21", {"unit_of_measurement": "°C"})
+        await hass.async_block_till_done()
+        restored = UpdateStore(hass, entry.entry_id)
+        await restored.initialize()
+        assert await restored.size() == 1
+        assert await restored.next_batch("centre") == batch
+        client.side_effect = None
+        stream_manifest.side_effect = None
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    restored = entry.runtime_data.updates.spool
+    assert await restored.next_batch("centre") == batch
+    assert restored.data["cursors"] == cursors
+    assert "manifest" in restored.data and "snapshot" in restored.data
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_full_queue_reserves_shutdown_space_without_losing_buffer(hass, entry):
     from homeassistant.exceptions import HomeAssistantError
 
@@ -934,3 +992,86 @@ async def test_real_recorder_dequeued_event_waits_for_commit_barrier(
             await asyncio.wait_for(recovery, 5)
     batch = await updates.spool.next_batch("centre")
     assert [r["value"] for r in batch["readings"]] == [21]
+
+
+@pytest.mark.parametrize("history_first", [False, True])
+async def test_real_recorder_missing_unit_preserves_live_payload_and_cursor(
+    recorder_db_url,
+    hass,
+    entry,
+    async_setup_recorder_instance,
+    tmp_path,
+    real_storage,
+    history_first,
+):
+    await async_setup_recorder_instance(
+        hass,
+        {
+            "db_url": f"sqlite:///{tmp_path / 'recorder.db'}",
+            "commit_interval": 60,
+        },
+    )
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.assignments = [ASSIGNMENT]
+    updates.subscribe()
+    at = datetime.now(UTC)
+    try:
+        hass.states.async_set(
+            ASSIGNMENT["entityId"], "20", {"unit_of_measurement": "°C", "large": "x" * 17000}
+        )
+        await hass.async_block_till_done()
+        live = list(updates.pending)
+        if not history_first:
+            await updates.spool.append(live)
+            batch = await updates.spool.next_batch("centre")
+        await updates.spool.ensure_cursor(ASSIGNMENT["id"], int(at.timestamp() * 1000) - 1000)
+        with patch("custom_components.registros_camaras.updates.datetime") as clock:
+            clock.now.return_value = at + timedelta(seconds=20)
+            clock.fromtimestamp.side_effect = datetime.fromtimestamp
+            await updates.recover()
+        if history_first:
+            assert updates.spool.data["rows"][0][1]["unit"] == ""
+            assert await updates.spool.next_batch("centre") is None
+            await updates.spool.append(live)
+            batch = await updates.spool.next_batch("centre")
+        assert await updates.spool.size() == 1
+        assert await updates.spool.next_batch("centre") == batch
+        assert batch["readings"] == [live[0][1]]
+        restored = UpdateStore(hass, entry.entry_id)
+        await restored.initialize()
+        assert await restored.next_batch("centre") == batch
+        assert restored.data["rows"][0][1] == live[0][1]
+        assert await restored.cursor(ASSIGNMENT["id"], 0) == int(
+            (at + timedelta(seconds=10)).timestamp() * 1000
+        )
+    finally:
+        updates.unsubscribe()
+
+
+async def test_incomplete_history_does_not_block_other_reports_or_weaken_conflicts(
+    hass, real_storage
+):
+    from homeassistant.exceptions import HomeAssistantError
+
+    spool = UpdateStore(hass, "missing-unit")
+    await spool.initialize()
+    await spool.append(
+        [
+            (ASSIGNMENT["source"], {**sample(), "mode": "history", "unit": ""}),
+            (ASSIGNMENT["source"], sample(1)),
+        ]
+    )
+    batch = await spool.next_batch("centre")
+    assert batch["readings"] == [sample(1)]
+    await spool.acknowledge(batch["commandId"])
+    restored = UpdateStore(hass, "missing-unit")
+    await restored.initialize()
+    assert await restored.size() == 1
+    with pytest.raises(HomeAssistantError, match="Conflicting"):
+        await restored.append([(ASSIGNMENT["source"], {**sample(), "value": 99})])
+    await restored.append([(ASSIGNMENT["source"], sample())])
+    batch = await restored.next_batch("centre")
+    assert batch["readings"] == [sample()]
+    await restored.append([(ASSIGNMENT["source"], {**sample(), "mode": "history", "unit": ""})])
+    assert await restored.next_batch("centre") == batch

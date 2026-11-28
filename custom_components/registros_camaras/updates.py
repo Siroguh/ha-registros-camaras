@@ -139,7 +139,10 @@ class Updates:
         self.stop_ready.set()
         self.write_ready.set()
         self.send_ready.set()
-        if self.stop_task is None:
+        if self.stop_task is None or (
+            self.stop_task.done()
+            and (self.stop_task.cancelled() or self.stop_task.exception() is not None)
+        ):
             self.stop_task = self.hass.async_create_task(
                 self.finish_stop(), "registros flush on stop"
             )

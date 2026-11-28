@@ -55,6 +55,8 @@ archivos y se señala la necesidad de recuperación, sin iniciar una cola vacía
 El apagado se coordina antes de que HA cancele las tareas, espera el executor y
 conserva el respaldo `FINAL_WRITE` con escritura ordenada. Cancela el transporte
 remoto sin esperar su timeout; el vaciado local sobrevive al plazo del job de HA.
+Si una descarga falla al guardar, el siguiente apagado vuelve a intentar el vaciado
+pendiente en vez de reutilizar la tarea fallida.
 
 La cola queda vinculada al servidor y centro, sin guardar la clave API. Una rotación
 de clave conserva el destino y reanuda el lote. Reconfigurar otra URL o centro
@@ -65,6 +67,8 @@ Las últimas asociaciones verificadas se conservan para ese destino y se escucha
 antes de esperar a HTTP durante un reinicio sin red. El dashboard conserva su
 última proyección como no disponible hasta recuperar conexión. Un manifiesto que
 retira todas las asociaciones locales retira también sus listeners.
+Si solo falta el archivo de caché, el índice, lote y cursores válidos se conservan
+y se vuelve a consultar el servidor; sin red ni manifiesto verificado no se captura.
 
 Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
 último cursor persistido. Fija cada ventana, espera la sincronización del escritor
@@ -73,6 +77,10 @@ desencolado aún en proceso); un timeout conserva el cursor. Excluye estados
 sintéticos. Los cambios coincidentes usan tiempo, huella del estado textual y ordinal;
 los atributos que Recorder puede descartar no intervienen en esa identidad y
 la recuperación reconstruye esas identidades sin coalescer cambios repetidos.
+Cuando Recorder descarta todos los atributos por tamaño, la coincidencia conserva
+la unidad y el payload live. Un histórico todavía sin unidad permanece almacenado
+sin bloquear otros reportes ni congelar un lote incompleto; la captura coincidente
+puede completarlo antes del envío. Los lotes ya preparados conservan su payload.
 Los datos recuperados son históricos y nunca renuevan su tiempo ni activan alertas
 antiguas. Recorder no conserva necesariamente reportes idénticos: no puede recuperar
 todos los reportes durante una pausa de captura, ni datos purgados o excluidos.

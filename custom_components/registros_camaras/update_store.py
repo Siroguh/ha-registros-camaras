@@ -73,10 +73,12 @@ class UpdateStore:
             self.cache_key = value.get("cache_key")
             if self.cache_key:
                 cached = await self.make_store(self.cache_key).async_load()
-                if not isinstance(cached, dict):
-                    raise HomeAssistantError("Missing sensor destination cache")
-                self.cached = cached
-                self.data = {**value, **cached}
+                if isinstance(cached, dict):
+                    self.cached = cached
+                    self.data = {**value, **cached}
+                else:
+                    # The queue is authoritative; this optional cache can be fetched online.
+                    self.cache_key = None
         await self.cleanup()
 
     def stored_keys(self) -> set[str]:
@@ -129,7 +131,7 @@ class UpdateStore:
 
     async def commit(self, data: dict) -> None:
         """Immutable bounded segments, then one atomic metadata commit (rows + cursor + ACK)."""
-        remaining = {identity(*item) for item in data["rows"]}
+        remaining = {identity(*item): item for item in data["rows"]}
         known = set()
         segments = []
         for descriptor, items in self.segments:
@@ -137,6 +139,15 @@ class UpdateStore:
             while start < len(items) and identity(*items[start]) not in remaining:
                 start += 1
             if start < len(items):
+                active = [item for item in items[start:] if identity(*item) in remaining]
+                if len(active) != len(items) - start or any(
+                    item != remaining[identity(*item)] for item in active
+                ):
+                    items = [remaining[identity(*item)] for item in active]
+                    descriptor = {"key": f"{self.key}.files/segment.{uuid4()}", "start": 0}
+                    self.garbage.add(descriptor["key"])
+                    await self.verified_save(self.make_store(descriptor["key"]), items)
+                    start = 0
                 segments.append(({**descriptor, "start": start}, items))
                 known.update(identity(*item) for item in items[start:])
         added: dict[str, list] = {}
@@ -214,6 +225,7 @@ class UpdateStore:
         async with self.lock:
             known = {identity(source, row): row for source, row in self.data["rows"]}
             added = []
+            replacements = {}
             for source, row in rows:
                 if row["value"] is not None and not math.isfinite(row["value"]):
                     raise ValueError("Non-finite sensor reading")
@@ -221,7 +233,23 @@ class UpdateStore:
                 if key in known:
                     original = {k: v for k, v in known[key].items() if k != "mode"}
                     if original != {k: v for k, v in row.items() if k != "mode"}:
-                        raise HomeAssistantError("Conflicting sensor report identity")
+                        prior = known[key]
+
+                        def comparable(value):
+                            return {k: v for k, v in value.items() if k not in {"mode", "unit"}}
+
+                        incomplete = prior if prior["mode"] == "history" else row
+                        live = row if row["mode"] == "live" else prior
+                        if not (
+                            incomplete["mode"] == "history"
+                            and incomplete["unit"] == ""
+                            and live["mode"] == "live"
+                            and comparable(prior) == comparable(row)
+                        ):
+                            raise HomeAssistantError("Conflicting sensor report identity")
+                        if prior["mode"] == "history":
+                            replacements[key] = deepcopy(live)
+                            known[key] = replacements[key]
                     continue
                 known[key] = row
                 added.append([source, deepcopy(row)])
@@ -232,9 +260,16 @@ class UpdateStore:
             cursors = {**self.data["cursors"]}
             if cursor:
                 cursors[cursor[0]] = max(cursors.get(cursor[0], 0), cursor[1])
-            if added or cursors != self.data["cursors"]:
+            if added or replacements or cursors != self.data["cursors"]:
                 await self.save(
-                    {**self.data, "rows": [*self.data["rows"], *added], "cursors": cursors}
+                    {
+                        **self.data,
+                        "rows": [
+                            [source, replacements.get(identity(source, row), row)]
+                            for source, row in [*self.data["rows"], *added]
+                        ],
+                        "cursors": cursors,
+                    }
                 )
 
     async def cursor(self, assignment_id: str, initial: int) -> int:
@@ -253,8 +288,16 @@ class UpdateStore:
                 return deepcopy(self.data["batch"])
             if not self.data["rows"]:
                 return None
-            source = self.data["rows"][0][0]
-            rows = [row for origin, row in self.data["rows"] if origin == source][:100]
+            # Do not freeze a valid historical value without the unit needed to interpret it.
+            eligible = [
+                (origin, row)
+                for origin, row in self.data["rows"]
+                if not (row["mode"] == "history" and row["status"] == "valid" and not row["unit"])
+            ]
+            if not eligible:
+                return None
+            source = eligible[0][0]
+            rows = [row for origin, row in eligible if origin == source][:100]
             batch = {
                 "apiVersion": 1,
                 "commandId": str(uuid4()),
