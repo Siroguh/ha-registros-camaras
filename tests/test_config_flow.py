@@ -11,6 +11,7 @@ from custom_components.registros_camaras.api import (
     AuthenticationError,
     CannotConnect,
     IncompatibleApi,
+    Snapshot,
 )
 from custom_components.registros_camaras.const import DEFAULT_CENTRE, DOMAIN
 from homeassistant import config_entries
@@ -175,3 +176,24 @@ async def test_pending_batch_cannot_follow_reconfigured_destination(
         assert entry.state is config_entries.ConfigEntryState.LOADED
         assert await entry.runtime_data.updates.spool.next_batch(DEFAULT_CENTRE) == original
         assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_empty_queue_reconfigure_reloads_and_resets_destination_cache(hass, entry, client):
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    spool = entry.runtime_data.updates.spool
+    await spool.ensure_cursor("old-assignment", 123)
+    old_destination = spool.data["destination"]
+    client.return_value = Snapshot({**client.return_value.raw, "revision": 99})
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": "reconfigure", "entry_id": entry.entry_id},
+        data={**DATA, "url": "https://new.example"},
+    )
+    assert result["reason"] == "reconfigure_successful"
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    spool = entry.runtime_data.updates.spool
+    assert spool.data["destination"] != old_destination
+    assert spool.data["cursors"] == {}
+    assert spool.data["snapshot"]["revision"] == 99
+    assert await hass.config_entries.async_unload(entry.entry_id)

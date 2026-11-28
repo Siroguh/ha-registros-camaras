@@ -32,6 +32,8 @@ class UpdateStore:
         self.segments: list[tuple[dict, list]] = []
         self.final_pending = False
         self.garbage: set[str] = set()
+        self.cache_key: str | None = None
+        self.cached: dict = {}
 
     def make_store(self, key: str | None = None) -> Store:
         return Store(
@@ -45,7 +47,12 @@ class UpdateStore:
 
     async def initialize(self) -> None:
         value = await self.store.async_load()
+        self.garbage = await self.hass.async_add_executor_job(self.stored_keys)
+        if value is None and self.garbage:
+            raise HomeAssistantError("Sensor queue index missing; stored files require recovery")
         if value is not None:
+            if not isinstance(value, dict):
+                raise HomeAssistantError("Invalid stored sensor update queue")
             if "segments" in value:
                 rows = []
                 for segment in value["segments"]:
@@ -63,15 +70,26 @@ class UpdateStore:
             ):
                 raise HomeAssistantError("Invalid stored sensor update queue")
             self.data = value
-        self.garbage = await self.hass.async_add_executor_job(
-            lambda: {
-                path.name for path in Path(self.store.path).parent.glob(f"{self.key}.segment.*")
-            }
-        )
+            self.cache_key = value.get("cache_key")
+            if self.cache_key:
+                cached = await self.make_store(self.cache_key).async_load()
+                if not isinstance(cached, dict):
+                    raise HomeAssistantError("Missing sensor destination cache")
+                self.cached = cached
+                self.data = {**value, **cached}
         await self.cleanup()
+
+    def stored_keys(self) -> set[str]:
+        root = Path(self.store.path).parent
+        return {path.name for path in root.glob(f"{self.key}.segment.*")} | {
+            f"{self.key}.files/{path.name}"
+            for path in (root / f"{self.key}.files").glob("*")
+            if path.name.startswith(("segment.", "cache."))
+        }
 
     async def cleanup(self) -> None:
         self.garbage.difference_update(d["key"] for d, _ in self.segments)
+        self.garbage.discard(self.cache_key)
         for key in list(self.garbage):
             try:
                 await self.make_store(key).async_remove()
@@ -139,14 +157,31 @@ class UpdateStore:
                     items = [*active, *items]
             for offset in range(0, len(items), SEGMENT_REPORTS):
                 chunk = items[offset : offset + SEGMENT_REPORTS]
-                descriptor = {"key": f"{self.key}.segment.{uuid4()}", "start": 0}
+                descriptor = {"key": f"{self.key}.files/segment.{uuid4()}", "start": 0}
                 self.garbage.add(descriptor["key"])
                 await self.verified_save(self.make_store(descriptor["key"]), chunk)
                 segments.append((descriptor, chunk))
-        metadata = {k: v for k, v in data.items() if k not in {"rows", "segments"}}
+        cached = {k: data[k] for k in ("snapshot", "manifest") if k in data}
+        cache_key = self.cache_key
+        if cached != self.cached:
+            cache_key = f"{self.key}.files/cache.{uuid4()}" if cached else None
+            if cache_key:
+                self.garbage.add(cache_key)
+                await self.verified_save(self.make_store(cache_key), cached)
+        metadata = {
+            k: v
+            for k, v in data.items()
+            if k not in {"rows", "segments", "snapshot", "manifest", "cache_key"}
+        }
+        if cache_key:
+            metadata["cache_key"] = cache_key
         metadata.update(commit=str(uuid4()), segments=[d for d, _ in segments])
         await self.verified_save(self.store, metadata)
         self.garbage.update(d["key"] for d, _ in self.segments)
+        if self.cache_key:
+            self.garbage.add(self.cache_key)
+        self.cache_key = cache_key
+        self.cached = cached
         self.segments = segments
         self.data = data
         await self.cleanup()
@@ -155,7 +190,13 @@ class UpdateStore:
         async with self.lock:
             previous = self.data.get("destination")
             if previous is not None and previous != destination:
-                raise HomeAssistantError("Pending sensor storage belongs to another destination")
+                if self.data["rows"] or self.data["batch"] is not None:
+                    raise HomeAssistantError(
+                        "Pending sensor storage belongs to another destination"
+                    )
+                await self.save(
+                    {"rows": [], "batch": None, "cursors": {}, "destination": destination}
+                )
             if previous is None:
                 await self.save({**self.data, "destination": destination})
 

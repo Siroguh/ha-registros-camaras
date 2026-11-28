@@ -12,7 +12,7 @@ import random
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from homeassistant.const import CONF_URL
+from homeassistant.const import CONF_URL, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HassJob, HomeAssistant, callback
 from homeassistant.helpers import entity_registry
 from homeassistant.helpers.event import (
@@ -40,9 +40,7 @@ def reading(assignment: dict, state, at: datetime, mode: str) -> dict:
         "assignmentId": assignment["id"],
         "sourceEventId": at.astimezone(UTC).isoformat()
         + ":change:"
-        + hashlib.sha256(
-            json.dumps([state.state, dict(state.attributes)], sort_keys=True, default=str).encode()
-        ).hexdigest(),
+        + hashlib.sha256(state.state.encode()).hexdigest(),
         "observedAt": int(at.timestamp() * 1000),
         "value": value if math.isfinite(value) else None,
         "unit": str(state.attributes.get("unit_of_measurement", ""))[:20],
@@ -81,6 +79,7 @@ class Updates:
         self.started_at = int(datetime.now(UTC).timestamp() * 1000)
         self.prepared = False
         self.change_counts: dict[str, tuple[datetime, dict[str, int]]] = {}
+        self.stop_task: asyncio.Task | None = None
 
     async def prepare(self) -> None:
         if self.prepared:
@@ -124,6 +123,9 @@ class Updates:
                 )
             )
         self.entry.async_on_unload(self.hass.async_add_shutdown_job(HassJob(self.stop)))
+        self.entry.async_on_unload(
+            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self.on_stop)
+        )
         self.send_ready.set()
 
     def unsubscribe(self) -> None:
@@ -137,10 +139,26 @@ class Updates:
         self.stop_ready.set()
         self.write_ready.set()
         self.send_ready.set()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.stop_task is None:
+            self.stop_task = self.hass.async_create_task(
+                self.finish_stop(), "registros flush on stop"
+            )
+        # HA may time out the shutdown job; the local flush must outlive that caller.
+        await asyncio.shield(self.stop_task)
+
+    async def on_stop(self, _: Event) -> None:
+        await self.stop()
+
+    async def finish_stop(self) -> None:
+        # Network work cannot hold up RAM persistence. A cancelled sender retains its batch.
+        for task in self.tasks[1:]:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.tasks[:1], return_exceptions=True)
         if self.pending:
             await self.spool.append(list(self.pending), shutdown=True)
             self.pending.clear()
+        await asyncio.gather(*self.tasks[1:], return_exceptions=True)
 
     async def wait(self, seconds: float) -> None:
         try:
@@ -285,11 +303,16 @@ class Updates:
             return False
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.history import get_significant_states
+        from homeassistant.components.recorder.tasks import SynchronizeTask
 
         until = int(datetime.now(UTC).timestamp() * 1000) - 10000
         recorder = get_instance(self.hass)
         # Freeze the window first, then synchronize the writer before querying readers.
-        await recorder.async_block_till_done()
+        # Always enqueue: Recorder's optional fast-path future can miss a dequeued event.
+        committed = self.hass.loop.create_future()
+        recorder.queue_task(SynchronizeTask(committed))
+        async with asyncio.timeout(30):
+            await committed
         more = False
         if await self.spool.size() >= MAX_REPORTS:
             return False

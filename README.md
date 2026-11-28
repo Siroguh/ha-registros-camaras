@@ -47,14 +47,20 @@ No borrar la cola para resolver una incidencia de conexión.
 Las muestras se guardan en segmentos inmutables de hasta 1000 reportes; los
 metadatos confirman segmentos, cursores y ACK juntos. Drenar 50 000 reportes en la
 regresión escribe unos 17,2 MB, con commits de hasta 34 KB, sin reescribir la cola
-completa por lote. Los segmentos huérfanos se recogen al abrir y después de commits.
+completa por lote, incluso con una caché de 1500 tareas. Las cachés se escriben solo
+cuando cambian, en archivos separados referenciados por el índice. Los segmentos
+y cachés usan un subdirectorio para acotar las claves retenidas por HA. La recogida
+de huérfanos requiere un índice válido: si falta o está dañado, se conservan los
+archivos y se señala la necesidad de recuperación, sin iniciar una cola vacía.
 El apagado se coordina antes de que HA cancele las tareas, espera el executor y
-conserva el respaldo `FINAL_WRITE` con escritura ordenada.
+conserva el respaldo `FINAL_WRITE` con escritura ordenada. Cancela el transporte
+remoto sin esperar su timeout; el vaciado local sobrevive al plazo del job de HA.
 
 La cola queda vinculada al servidor y centro, sin guardar la clave API. Una rotación
 de clave conserva el destino y reanuda el lote. Reconfigurar otra URL o centro
 bloquea la entrega de la cola anterior y conserva sus datos; volver al destino
-original permite reanudarla. Para un destino independiente se usa otra entrada.
+original permite reanudarla. Con la cola vacía, cambiar de destino reinicia los
+cursores y las cachés anteriores. Para un destino independiente se usa otra entrada.
 Las últimas asociaciones verificadas se conservan para ese destino y se escuchan
 antes de esperar a HTTP durante un reinicio sin red. El dashboard conserva su
 última proyección como no disponible hasta recuperar conexión. Un manifiesto que
@@ -62,8 +68,10 @@ retira todas las asociaciones locales retira también sus listeners.
 
 Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
 último cursor persistido. Fija cada ventana, espera la sincronización del escritor
-Recorder (también con `commit_interval=60`) y excluye estados sintéticos. Los cambios
-coincidentes usan tiempo, huella de estado/atributos y ordinal de ocurrencia;
+Recorder con una barrera encolada (también con `commit_interval=60` y un evento
+desencolado aún en proceso); un timeout conserva el cursor. Excluye estados
+sintéticos. Los cambios coincidentes usan tiempo, huella del estado textual y ordinal;
+los atributos que Recorder puede descartar no intervienen en esa identidad y
 la recuperación reconstruye esas identidades sin coalescer cambios repetidos.
 Los datos recuperados son históricos y nunca renuevan su tiempo ni activan alertas
 antiguas. Recorder no conserva necesariamente reportes idénticos: no puede recuperar

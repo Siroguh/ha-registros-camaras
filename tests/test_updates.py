@@ -18,7 +18,7 @@ _STORE_REMOVE = Store.async_remove
 
 @pytest.fixture
 def mock_recorder_before_hass(request):
-    if request.node.name == "test_recovery_waits_for_real_recorder_commit":
+    if "real_recorder" in request.node.name:
         request.getfixturevalue("recorder_db_url")
 
 
@@ -137,6 +137,100 @@ async def test_shutdown_uses_homeassistant_final_write(hass, entry):
     await restored.initialize()
     assert await restored.size() == 1
     hass.set_state(CoreState.not_running)
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "missing"])
+async def test_missing_index_preserves_segments_for_recovery(hass, real_storage, damage):
+    from pathlib import Path
+
+    from homeassistant.exceptions import HomeAssistantError
+
+    spool = UpdateStore(hass, "damaged-index")
+    await spool.initialize()
+    await spool.append([(ASSIGNMENT["source"], sample())])
+    batch = await spool.next_batch("centre")
+    index = Path(spool.store.path)
+    original = await hass.async_add_executor_job(index.read_bytes)
+    segment = Path(spool.make_store(spool.segments[0][0]["key"]).path)
+    if damage == "corrupt":
+        await hass.async_add_executor_job(index.write_text, "{")
+    else:
+        await hass.async_add_executor_job(index.unlink)
+    for _ in range(2):
+        with pytest.raises(HomeAssistantError, match="require recovery"):
+            await UpdateStore(hass, "damaged-index").initialize()
+        assert await hass.async_add_executor_job(segment.exists)
+    await hass.async_add_executor_job(index.write_bytes, original)
+    restored = UpdateStore(hass, "damaged-index")
+    await restored.initialize()
+    assert await restored.next_batch("centre") == batch
+
+
+async def test_repeated_empty_queues_keep_store_keys_and_cache_writes_bounded(hass, real_storage):
+    from homeassistant.helpers.storage import get_internal_store_manager
+
+    spool = UpdateStore(hass, "repeated-drain")
+    await spool.initialize()
+    snapshot = {"tasks": [{"id": str(n), "description": "x" * 300} for n in range(1500)]}
+    await spool.cache(snapshot=snapshot, manifest={"assignments": [ASSIGNMENT]})
+    manager = get_internal_store_manager(hass)
+    before = set(manager._invalidated)
+    sizes = []
+    original = Store._write_prepared_data
+
+    def measure(store, mode, data):
+        sizes.append(len(data))
+        original(store, mode, data)
+
+    with patch.object(Store, "_write_prepared_data", measure):
+        for n in range(100):
+            await spool.append([(ASSIGNMENT["source"], sample(n))])
+            batch = await spool.next_batch("centre")
+            await spool.acknowledge(batch["commandId"])
+        await spool.cache(snapshot=snapshot)
+    assert manager._invalidated == before
+    assert max(sizes) < 4000
+    assert sum(sizes) < 400_000
+    assert not spool.segments
+    restored = UpdateStore(hass, "repeated-drain")
+    await restored.initialize()
+    assert restored.data["snapshot"] == snapshot
+    assert await restored.size() == 0
+
+
+async def test_legacy_segments_and_inline_cache_upgrade_atomically(hass, real_storage):
+    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.util.file import WriteError
+
+    spool = UpdateStore(hass, "legacy-segments")
+    legacy_key = f"{spool.key}.segment.old"
+    await spool.make_store(legacy_key).async_save([[ASSIGNMENT["source"], sample()]])
+    await spool.store.async_save(
+        {
+            "segments": [{"key": legacy_key, "start": 0}],
+            "batch": None,
+            "cursors": {},
+            "snapshot": {"revision": 1},
+            "manifest": {"assignments": [ASSIGNMENT]},
+        }
+    )
+    await spool.initialize()
+    assert spool.data["snapshot"] == {"revision": 1}
+    with patch.object(spool.store, "_async_write_data", side_effect=WriteError("disk failed")):
+        with pytest.raises(HomeAssistantError, match="not persisted"):
+            await spool.cache(snapshot={"revision": 2})
+    restored = UpdateStore(hass, "legacy-segments")
+    await restored.initialize()
+    assert restored.data["snapshot"] == {"revision": 1}
+    assert await restored.size() == 1
+    await restored.cache(snapshot={"revision": 2})
+    metadata = await restored.store.async_load()
+    assert "snapshot" not in metadata
+    assert metadata["cache_key"]
+    reopened = UpdateStore(hass, "legacy-segments")
+    await reopened.initialize()
+    assert reopened.data["snapshot"] == {"revision": 2}
+    assert (await reopened.next_batch("centre"))["readings"] == [sample()]
 
 
 async def test_real_ha_changed_and_identical_reports_are_copied_without_coalescing(hass, entry):
@@ -333,7 +427,8 @@ async def test_native_entry_unload_joins_transport_and_removes_subscriptions(
     hass.states.async_set(ASSIGNMENT["entityId"], "20", {"unit_of_measurement": "°C"})
     await hass.async_block_till_done()
     assert await hass.config_entries.async_unload(entry.entry_id)
-    assert all(task.done() and not task.cancelled() for task in updates.tasks)
+    assert all(task.done() for task in updates.tasks)
+    assert not updates.tasks[0].cancelled()
     restored = UpdateStore(hass, entry.entry_id)
     await restored.initialize()
     assert await restored.size() == 1
@@ -386,6 +481,7 @@ async def test_recorder_overlap_is_deduplicated_and_cursor_commits_with_rows(has
     await updates.spool.append([(ASSIGNMENT["source"], reading(ASSIGNMENT, state, at, "live"))])
     hass.config.components.add("recorder")
     recorder = AsyncMock()
+    recorder.queue_task = lambda task: task.future.set_result(None)
     recorder.async_add_executor_job.side_effect = lambda work: work()
     with (
         patch("homeassistant.components.recorder.get_instance", return_value=recorder),
@@ -470,7 +566,7 @@ async def test_shutdown_joins_blocked_executor_before_final_snapshot(
 
     def write(store, mode, data):
         nonlocal blocked
-        if ".segment." in store.key and not blocked:
+        if "/segment." in store.key and not blocked:
             blocked = True
             hass.loop.call_soon_threadsafe(entered.set)
             assert release.wait(5)
@@ -492,7 +588,8 @@ async def test_shutdown_joins_blocked_executor_before_final_snapshot(
     await restored.initialize()
     batch = await restored.next_batch(entry.data["centre_id"])
     assert [row["value"] for row in batch["readings"]] == [20, 21]
-    assert all(task.done() and not task.cancelled() for task in updates.tasks)
+    assert all(task.done() for task in updates.tasks)
+    assert not updates.tasks[0].cancelled()
 
 
 async def test_coincident_changes_and_recorder_overlap_keep_every_occurrence(hass, entry):
@@ -519,6 +616,7 @@ async def test_coincident_changes_and_recorder_overlap_keep_every_occurrence(has
         await updates.spool.ensure_cursor(ASSIGNMENT["id"], int(at.timestamp() * 1000) - 1000)
         hass.config.components.add("recorder")
         recorder = AsyncMock()
+        recorder.queue_task = lambda task: task.future.set_result(None)
         recorder.async_add_executor_job.side_effect = lambda work: work()
         with (
             patch("homeassistant.components.recorder.get_instance", return_value=recorder),
@@ -605,6 +703,8 @@ async def test_full_queue_drain_has_bounded_write_volume_and_restarts(hass, real
 
     spool = UpdateStore(hass, "full-queue")
     await spool.initialize()
+    snapshot = {"tasks": [{"id": str(n), "description": "x" * 300} for n in range(1500)]}
+    await spool.cache(snapshot=snapshot, manifest={"assignments": [ASSIGNMENT]})
     sizes = []
     original = Store._write_prepared_data
 
@@ -621,6 +721,7 @@ async def test_full_queue_drain_has_bounded_write_volume_and_restarts(hass, real
             if count == 0:
                 spool = UpdateStore(hass, "full-queue")
                 await spool.initialize()
+                assert spool.data["snapshot"] == snapshot
                 assert await spool.next_batch("centre") == batch
             count += len(batch["readings"])
             await spool.acknowledge(batch["commandId"])
@@ -671,3 +772,165 @@ async def test_recovery_waits_for_real_recorder_commit(
     assert await restored.cursor(ASSIGNMENT["id"], 0) == int(
         (at + timedelta(seconds=10)).timestamp() * 1000
     )
+
+
+async def test_shutdown_timeout_flushes_ram_with_http_and_executor_blocked(
+    hass, entry, client, stream_manifest, real_storage
+):
+    import threading
+
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+
+    hass.config.external_url = ASSIGNMENT["source"]
+    stream_manifest.return_value["assignments"] = [ASSIGNMENT]
+    http_entered = asyncio.Event()
+    writer_entered = asyncio.Event()
+    stopped = asyncio.Event()
+    release = threading.Event()
+    original_write = Store._write_prepared_data
+    original_wait = Updates.wait
+
+    async def slow_http(_):
+        http_entered.set()
+        await asyncio.Event().wait()
+
+    async def wait(updates, seconds):
+        await original_wait(updates, 0 if seconds == 2 else seconds)
+
+    def write(store, mode, data):
+        if "/segment." in store.key:
+            hass.loop.call_soon_threadsafe(writer_entered.set)
+            assert release.wait(5)
+        original_write(store, mode, data)
+
+    async def on_stop(_):
+        stopped.set()
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, on_stop)
+    with (
+        patch.object(RegistrosClient, "push_updates", side_effect=slow_http),
+        patch.object(Updates, "wait", wait),
+        patch("homeassistant.core.STOPPING_STAGE_SHUTDOWN_TIMEOUT", 0.05),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        hass.states.async_set(ASSIGNMENT["entityId"], "20", {"unit_of_measurement": "°C"})
+        await asyncio.wait_for(http_entered.wait(), 5)
+        with patch.object(Store, "_write_prepared_data", write):
+            hass.states.async_set(ASSIGNMENT["entityId"], "21", {"unit_of_measurement": "°C"})
+            await asyncio.wait_for(writer_entered.wait(), 5)
+            hass.states.async_set(ASSIGNMENT["entityId"], "22", {"unit_of_measurement": "°C"})
+            stopping = asyncio.create_task(hass.async_stop())
+            try:
+                await asyncio.wait_for(stopped.wait(), 5)
+            finally:
+                release.set()
+            await asyncio.wait_for(stopping, 10)
+    restored = UpdateStore(hass, entry.entry_id)
+    await restored.initialize()
+    assert [r["value"] for _, r in restored.data["rows"]] == [20, 21, 22]
+    assert (await restored.next_batch(entry.data["centre_id"]))["readings"][0]["value"] == 20
+
+
+async def test_real_recorder_excluded_attributes_keep_live_identity(
+    recorder_db_url, hass, entry, async_setup_recorder_instance, tmp_path
+):
+    recorder = await async_setup_recorder_instance(
+        hass,
+        {
+            "db_url": f"sqlite:///{tmp_path / 'recorder.db'}",
+            "commit_interval": 60,
+        },
+    )
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.assignments = [ASSIGNMENT]
+    updates.subscribe()
+    at = datetime.now(UTC)
+    try:
+        with patch("homeassistant.core.time.time", return_value=at.timestamp()):
+            for value in (20, 21, 20):
+                hass.states.async_set(
+                    ASSIGNMENT["entityId"],
+                    str(value),
+                    {
+                        "unit_of_measurement": "°C",
+                        "attribution": "Excluded by Recorder",
+                    },
+                )
+                await hass.async_block_till_done()
+        await recorder.async_block_till_done()
+        await updates.spool.append(list(updates.pending))
+        await updates.spool.ensure_cursor(ASSIGNMENT["id"], int(at.timestamp() * 1000) - 1000)
+        with patch("custom_components.registros_camaras.updates.datetime") as clock:
+            clock.now.return_value = at + timedelta(seconds=20)
+            clock.fromtimestamp.side_effect = datetime.fromtimestamp
+            await updates.recover()
+        assert await updates.spool.size() == 3
+        batch = await updates.spool.next_batch("centre")
+        assert [r["value"] for r in batch["readings"]] == [20, 21, 20]
+        assert all(r["mode"] == "live" for r in batch["readings"])
+    finally:
+        updates.unsubscribe()
+
+
+async def test_real_recorder_dequeued_event_waits_for_commit_barrier(
+    recorder_db_url, hass, entry, async_setup_recorder_instance, tmp_path
+):
+    import threading
+
+    from homeassistant.const import EVENT_STATE_CHANGED
+
+    recorder = await async_setup_recorder_instance(
+        hass,
+        {
+            "db_url": f"sqlite:///{tmp_path / 'recorder.db'}",
+            "commit_interval": 60,
+        },
+    )
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.assignments = [ASSIGNMENT]
+    at = datetime.now(UTC)
+    start = int(at.timestamp() * 1000) - 1000
+    await updates.spool.ensure_cursor(ASSIGNMENT["id"], start)
+    await recorder.async_block_till_done()
+    entered = asyncio.Event()
+    queued = asyncio.Event()
+    release = threading.Event()
+    original = recorder._process_one_event
+    original_queue = recorder.queue_task
+
+    def process(event):
+        if (
+            event.event_type == EVENT_STATE_CHANGED
+            and event.data.get("entity_id") == ASSIGNMENT["entityId"]
+        ):
+            hass.loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        original(event)
+
+    def enqueue(task):
+        queued.set()
+        original_queue(task)
+
+    with patch.object(recorder, "_process_one_event", process):
+        hass.states.async_set(ASSIGNMENT["entityId"], "21", {"unit_of_measurement": "°C"})
+        await asyncio.wait_for(entered.wait(), 5)
+        assert recorder._queue.empty()
+        assert not recorder._event_session_has_pending_writes
+        with (
+            patch.object(recorder, "queue_task", enqueue),
+            patch("custom_components.registros_camaras.updates.datetime") as clock,
+        ):
+            clock.now.return_value = at + timedelta(seconds=20)
+            clock.fromtimestamp.side_effect = datetime.fromtimestamp
+            recovery = asyncio.create_task(updates.recover())
+            try:
+                await asyncio.wait_for(queued.wait(), 5)
+                assert not recovery.done()
+                assert await updates.spool.cursor(ASSIGNMENT["id"], 0) == start
+            finally:
+                release.set()
+            await asyncio.wait_for(recovery, 5)
+    batch = await updates.spool.next_batch("centre")
+    assert [r["value"] for r in batch["readings"]] == [21]
