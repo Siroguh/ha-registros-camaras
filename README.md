@@ -8,7 +8,9 @@ Usa la API autenticada de la aplicación nueva; no consulta directamente D1.
 ## Instalación y configuración
 
 Requiere Home Assistant **2026.10.3 o posterior** y un servidor que implemente
-`GET /api/integration/:centreId`, versión de contrato 1.
+`GET /api/integration/:centreId`, `GET /api/environment/streams/:centreId` y
+`POST /api/environment/updates`, versión de contrato 1. Actualizar el servidor
+antes de instalar la integración 1.1.
 
 1. Añade este repositorio como integración personalizada en HACS, o en la
    Marketplace integrada de HA 2026.11 o posterior.
@@ -26,7 +28,77 @@ La integración nunca entrega la clave a las tarjetas ni a los diagnósticos.
 No se ha enviado este repositorio al catálogo público: se instala como repositorio
 personalizado. `hacs.json` sirve para HACS y Marketplace; no es una app/add-on de HA OS.
 
-## Entidades
+## Envío de actualizaciones de sensores
+
+La integración 1.1 escucha cada reporte de los sensores asignados por el servidor,
+incluidos los que repiten exactamente el valor y los atributos. La URL interna o
+externa de este HA debe coincidir con `source` de esas asociaciones. Los eventos
+se copian inmediatamente y se agrupan sin perder muestras (hasta 100 por lote,
+ventana de dos segundos). Los reportes iguales conservan identidad propia incluso
+si comparten timestamp.
+
+Una cola con `homeassistant.helpers.storage.Store`, en la clave versionada
+`registros_camaras.updates.<entry_id>`, conserva muestras y lotes hasta recibir
+confirmación durable del servidor. Usa escritura atómica nativa HA. Reintentos usan
+el mismo UUID y contenido; un reinicio o una respuesta HTTP perdida no duplica la
+lectura. El I/O y la serialización se ejecutan fuera del event loop. La durabilidad
+comienza al verificar el guardado: un apagado abrupto anterior puede perder lo todavía en RAM.
+No borrar la cola para resolver una incidencia de conexión.
+Las muestras se guardan en segmentos inmutables de hasta 1000 reportes; los
+metadatos confirman segmentos, cursores y ACK juntos. Drenar 50 000 reportes en la
+regresión escribe unos 17,2 MB, con commits de hasta 34 KB, sin reescribir la cola
+completa por lote, incluso con una caché de 1500 tareas. Las cachés se escriben solo
+cuando cambian, en archivos separados referenciados por el índice. Los segmentos
+y cachés usan un subdirectorio para acotar las claves retenidas por HA. La recogida
+de huérfanos requiere un índice válido: si falta o está dañado, se conservan los
+archivos y se señala la necesidad de recuperación, sin iniciar una cola vacía.
+El apagado se coordina antes de que HA cancele las tareas, espera el executor y
+conserva el respaldo `FINAL_WRITE` con escritura ordenada. Cancela el transporte
+remoto sin esperar su timeout; el vaciado local sobrevive al plazo del job de HA.
+Si una descarga falla al guardar, el siguiente apagado vuelve a intentar el vaciado
+pendiente en vez de reutilizar la tarea fallida.
+
+La cola queda vinculada al servidor y centro, sin guardar la clave API. Una rotación
+de clave conserva el destino y reanuda el lote. Reconfigurar otra URL o centro
+bloquea la entrega de la cola anterior y conserva sus datos; volver al destino
+original permite reanudarla. Con la cola vacía, cambiar de destino reinicia los
+cursores y las cachés anteriores. Para un destino independiente se usa otra entrada.
+Las últimas asociaciones verificadas se conservan para ese destino y se escuchan
+antes de esperar a HTTP durante un reinicio sin red. El dashboard conserva su
+última proyección como no disponible hasta recuperar conexión. Un manifiesto que
+retira todas las asociaciones locales retira también sus listeners.
+Si solo falta el archivo de caché, el índice, lote y cursores válidos se conservan
+y se vuelve a consultar el servidor; sin red ni manifiesto verificado no se captura.
+
+Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
+último cursor persistido. Fija cada ventana, espera la sincronización del escritor
+Recorder con una barrera encolada (también con `commit_interval=60` y un evento
+desencolado aún en proceso); un timeout conserva el cursor. Excluye estados
+sintéticos. Los cambios coincidentes usan tiempo, huella del estado textual y ordinal;
+los atributos que Recorder puede descartar no intervienen en esa identidad y
+la recuperación reconstruye esas identidades sin coalescer cambios repetidos.
+Cuando Recorder descarta todos los atributos por tamaño, la coincidencia conserva
+la unidad y el payload live. Un histórico todavía sin unidad permanece almacenado
+sin bloquear otros reportes ni congelar un lote incompleto; la captura coincidente
+puede completarlo antes del envío. Los lotes ya preparados conservan su payload.
+Estos históricos incompletos tienen un cupo separado de 1000 reportes: no consumen
+la capacidad de captura/envío live. Si se llena, la recuperación conserva su cursor
+y queda pendiente; captura y entrega continúan aunque nunca aparezca la unidad.
+Las filas anteriores que excedan ese cupo se conservan sin permitir que crezca.
+Los datos recuperados son históricos y nunca renuevan su tiempo ni activan alertas
+antiguas. Recorder no conserva necesariamente reportes idénticos: no puede recuperar
+todos los reportes durante una pausa de captura, ni datos purgados o excluidos.
+
+Los diagnósticos incluyen cola, buffer RAM, capacidad, pausa y errores seguros.
+El buffer tiene límite de 10 000 y Store de 50 000 muestras (más una reserva de
+10 000 para vaciar RAM al descargar/apagar); saturación pausa captura
+y conserva lo ya recibido. Al drenar la cola se reanuda. Errores de credenciales,
+contrato o asociación conservan el lote rechazado para corregir su causa.
+La cadencia de sensores y sus relojes deben ser compatibles con los 30 segundos de
+frescura live del servidor. Conservar todos los reportes genera almacenamiento
+proporcional a su frecuencia; agruparlos reduce peticiones, no muestras.
+
+## Entidades del dashboard
 
 Un dispositivo de centro contiene conexión, tareas pendientes/vencidas y actualizar.
 Cada cámara tiene:

@@ -83,12 +83,29 @@ def custom_integrations(enable_custom_integrations):
 
 
 @pytest.fixture
+def stream_manifest():
+    with patch(
+        "custom_components.registros_camaras.api.RegistrosClient.sensor_stream",
+        new=AsyncMock(
+            return_value={
+                "apiVersion": 1,
+                "revision": 0,
+                "assignments": [],
+                "maxBatchSize": 100,
+                "maxBatchDelayMillis": 2000,
+            }
+        ),
+    ) as manifest:
+        yield manifest
+
+
+@pytest.fixture
 def raw():
     return deepcopy(RAW)
 
 
 @pytest.fixture
-def client(raw):
+def client(raw, stream_manifest):
     with patch(
         "custom_components.registros_camaras.api.RegistrosClient.snapshot",
         new=AsyncMock(return_value=decode_snapshot(raw, DEFAULT_CENTRE)),

@@ -225,6 +225,38 @@ class RegistrosClient:
             await self.request("GET", f"integration/{self.centre_id}"), self.centre_id
         )
 
+    async def sensor_stream(self) -> dict:
+        value = await self.request("GET", f"environment/streams/{self.centre_id}")
+        try:
+            _require(type(value["apiVersion"]) is int and value["apiVersion"] == 1)
+            _require(value["maxBatchSize"] == 100 and value["maxBatchDelayMillis"] == 2000)
+            _require(type(value["revision"]) is int and value["revision"] >= 0)
+            _require(isinstance(value["assignments"], list))
+            ids = set()
+            for assignment in value["assignments"]:
+                for key in ("id", "source", "entityId", "locationId"):
+                    _require(isinstance(assignment[key], str) and bool(assignment[key]))
+                _require(assignment["id"] not in ids)
+                ids.add(assignment["id"])
+                _require(assignment["entityId"].startswith("sensor."))
+                for key in ("startsAt", "historyFrom"):
+                    _timestamp(assignment[key])
+                if assignment["endsAt"] is not None:
+                    _timestamp(assignment["endsAt"])
+            return value
+        except (KeyError, TypeError, ValueError, OverflowError, OSError) as err:
+            raise IncompatibleApi("Invalid sensor stream manifest") from err
+
+    async def push_updates(self, batch: dict) -> None:
+        receipt = await self.request("POST", "environment/updates", batch)
+        if (
+            receipt.get("commandId") != batch["commandId"]
+            or receipt.get("stream") != f"ReadingIngestion/{batch['commandId']}"
+            or receipt.get("eventId") != f"ReadingIngestion/{batch['commandId']}:1"
+            or receipt.get("version") != 1
+        ):
+            raise IncompatibleApi("Unexpected durable ingestion acknowledgement")
+
     async def command(self, action: str, data: dict) -> dict:
         """IDs and revisions come from the caller, so retries remain durable across HA restarts."""
         body = {"commandId": data["command_id"], "expectedRevision": data["expected_revision"]}

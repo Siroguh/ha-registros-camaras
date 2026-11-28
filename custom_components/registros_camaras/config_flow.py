@@ -51,6 +51,7 @@ class RegistrosConfigFlow(ConfigFlow, domain=DOMAIN):
                     data[CONF_CENTRE_ID],
                 )
                 await client.snapshot()
+                await client.sensor_stream()
             except ValueError:
                 errors["base"] = "invalid_address"
             except AuthenticationError:

@@ -10,6 +10,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import ApiError, AuthenticationError, RegistrosClient, Snapshot
 from .const import DOMAIN, UPDATE_INTERVAL_SECONDS
+from .updates import Updates
 
 type RegistrosConfigEntry = ConfigEntry[RegistrosCoordinator]
 
@@ -28,6 +29,7 @@ class RegistrosCoordinator(DataUpdateCoordinator[Snapshot]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
         )
         self.client = client
+        self.updates = Updates(hass, entry, client)
 
     async def _async_update_data(self) -> Snapshot:
         try:
