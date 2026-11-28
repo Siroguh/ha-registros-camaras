@@ -36,6 +36,15 @@ class Rejected(ApiError):
     """The server rejected the operation."""
 
 
+class UpdatesRejected(ApiError):
+    """An authenticated Domain response proves this batch was never accepted."""
+
+    def __init__(self, command_id: str, reason: str) -> None:
+        super().__init__("Sensor updates definitively rejected")
+        self.command_id = command_id
+        self.reason = reason
+
+
 def normalize_url(value: str) -> str:
     """Accept a server root, never embedded credentials, queries or fragments."""
     parts = urlsplit(value.strip())
@@ -188,6 +197,34 @@ class RegistrosClient:
                 ) as response:
                     if response.status in {401, 403}:
                         raise AuthenticationError("API key rejected")
+                    if (
+                        response.status == 422
+                        and method == "POST"
+                        and path == "environment/updates"
+                    ):
+                        # Generic HTTP failures cannot prove an unknown command was rejected.
+                        # Only this versioned, command-bound Domain contract permits quarantine.
+                        payload = bytearray()
+                        async for chunk in response.content.iter_chunked(4096):
+                            payload.extend(chunk)
+                            if len(payload) > 4096:
+                                raise IncompatibleApi("Rejection response too large")
+                        try:
+                            rejection = json.loads(payload)
+                        except (ValueError, UnicodeError) as err:
+                            raise IncompatibleApi("Invalid rejection response") from err
+                        if (
+                            isinstance(rejection, dict)
+                            and rejection.get("_tag") == "SensorUpdatesRejected"
+                            and type(rejection.get("apiVersion")) is int
+                            and rejection["apiVersion"] == 1
+                            and body is not None
+                            and rejection.get("commandId") == body["commandId"]
+                            and rejection.get("reason") == "assignment_window"
+                            and rejection.get("accepted") is False
+                        ):
+                            raise UpdatesRejected(body["commandId"], "assignment_window")
+                        raise IncompatibleApi("Unverified sensor update rejection")
                     if response.status == 409:
                         try:
                             error = json.loads(await response.content.read(65536))

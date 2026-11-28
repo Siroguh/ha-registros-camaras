@@ -25,7 +25,7 @@ class RegistrosEntity(CoordinatorEntity[RegistrosCoordinator]):
             self._attr_device_info = DeviceInfo(
                 identifiers={(DOMAIN, f"{entry_id}_{location_id}")},
                 name=location["name"],
-                via_device=root,
+                via_device_id=coordinator.root_device_id,
                 manufacturer="Registros Cámaras",
                 model="Cámara",
             )

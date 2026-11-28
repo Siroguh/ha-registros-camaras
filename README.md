@@ -33,8 +33,8 @@ personalizado. `hacs.json` sirve para HACS y Marketplace; no es una app/add-on d
 La integración 1.1 escucha cada reporte de los sensores asignados por el servidor,
 incluidos los que repiten exactamente el valor y los atributos. La URL interna o
 externa de este HA debe coincidir con `source` de esas asociaciones. Los eventos
-se copian inmediatamente y se agrupan sin perder muestras (hasta 100 por lote,
-ventana de dos segundos). Los reportes iguales conservan identidad propia incluso
+se copian inmediatamente y se agrupan sin perder muestras (hasta 100 por lote de
+la misma fuente y asociación, ventana de dos segundos). Los reportes iguales conservan identidad propia incluso
 si comparten timestamp.
 
 Una cola con `homeassistant.helpers.storage.Store`, en la clave versionada
@@ -44,6 +44,9 @@ el mismo UUID y contenido; un reinicio o una respuesta HTTP perdida no duplica l
 lectura. El I/O y la serialización se ejecutan fuera del event loop. La durabilidad
 comienza al verificar el guardado: un apagado abrupto anterior puede perder lo todavía en RAM.
 No borrar la cola para resolver una incidencia de conexión.
+El índice usa la versión de Store 2 y migra el índice v1 conservando muestras,
+cursores y UUID/payload pendiente. Un cliente antiguo no puede abrir el índice v2:
+así se impide que desconozca los bloqueados y los reenvíe con comandos nuevos.
 Las muestras se guardan en segmentos inmutables de hasta 1000 reportes; los
 metadatos confirman segmentos, cursores y ACK juntos. Drenar 50 000 reportes en la
 regresión escribe unos 17,2 MB, con commits de hasta 34 KB, sin reescribir la cola
@@ -69,6 +72,10 @@ antes de esperar a HTTP durante un reinicio sin red. El dashboard conserva su
 retira todas las asociaciones locales retira también sus listeners.
 Si solo falta el archivo de caché, el índice, lote y cursores válidos se conservan
 y se vuelve a consultar el servidor; sin red ni manifiesto verificado no se captura.
+La caché del dashboard sigue los sondeos verificados: escribe como máximo una vez
+por minuto durante ejecución y vacía la última proyección al descargar/apagar.
+Solo esta caché reconstruible se coalesce, nunca las muestras de sensores. Un fallo
+de caché se diagnostica y reintenta sin ocultar el recibo de un comando aceptado.
 
 Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
 último cursor persistido. Fija cada ventana, espera la sincronización del escritor
@@ -77,6 +84,19 @@ desencolado aún en proceso); un timeout conserva el cursor. Excluye estados
 sintéticos. Los cambios coincidentes usan tiempo, huella del estado textual y ordinal;
 los atributos que Recorder puede descartar no intervienen en esa identidad y
 la recuperación reconstruye esas identidades sin coalescer cambios repetidos.
+La conversión comprimida nativa conserva `null` para una baja de entidad y `""`
+para un estado vacío genuino: solo se excluye el primero. `unknown`, `unavailable`
+y cadenas vacías reales se conservan como reportes inválidos/no disponibles.
+Las consultas se limitan a 1001 filas (1000 más una de avance), usando los
+constructores nativos de Recorder en `history.py`, su sesión y su conversión.
+La API pública de historia de HA 2026.10.3 no ofrece límite de filas y la alternativa
+con `limit` omite cambios de atributos: se aíslan aquí los helpers internos de HA,
+sin SQL textual, conexión propia ni esquema paralelo. Requieren pruebas con Recorder
+real al actualizar HA. Las páginas y las adaptaciones al espacio libre terminan
+entre milisegundos completos, sin dividir/reidentificar ocurrencias coincidentes.
+Si un único milisegundo supera 1000 filas, se conserva su cursor pendiente y se
+diagnostica el límite; las demás asociaciones siguen recuperándose. No se afirma
+que ese grupo excesivo se haya recuperado. El orden de atención rota entre pasadas.
 Cuando Recorder descarta todos los atributos por tamaño, la coincidencia conserva
 la unidad y el payload live. Un histórico todavía sin unidad permanece almacenado
 sin bloquear otros reportes ni congelar un lote incompleto; la captura coincidente
@@ -94,6 +114,32 @@ El buffer tiene límite de 10 000 y Store de 50 000 muestras (más una reserva d
 10 000 para vaciar RAM al descargar/apagar); saturación pausa captura
 y conserva lo ya recibido. Al drenar la cola se reanuda. Errores de credenciales,
 contrato o asociación conservan el lote rechazado para corregir su causa.
+Los rechazos **definitivos demostrados por Domain** usan este contrato específico
+de `POST /api/environment/updates` (HTTP **422**):
+
+```json
+{"_tag":"SensorUpdatesRejected","apiVersion":1,"commandId":"UUID-del-lote","reason":"assignment_window","accepted":false}
+```
+
+El servidor solo puede emitirlo antes de aceptar ese comando: un fallo de disco,
+timeout, conflicto de identidad, reloj futuro corregible o ACK perdido no lo prueban.
+La integración verifica versión, UUID, razón allowlisted y `accepted: false`. Una
+respuesta HTTP genérica conserva el reintento original; requiere el servidor con
+este contrato para aislar automáticamente el rechazo de una asociación cerrada.
+
+El lote demostrado como rechazado se conserva íntegro en un Store inmutable con
+su UUID/payload y razón; **no es un ACK**, no se descartan ni reasignan sus lecturas.
+Un lote mixto de una versión anterior queda entero bloqueado: sus filas sanas
+tampoco se reenvían bajo un UUID nuevo. Las otras filas pendientes pueden avanzar;
+los nuevos lotes separan asociaciones para evitar ese bloqueo mixto.
+Los bloqueados comparten el presupuesto total de 50 000 muestras más la reserva
+de apagado de 10 000; no son almacenamiento ilimitado ni se borran para liberar
+capacidad. Al agotar ese total se pausa la captura, aunque continúa el envío de
+filas sanas ya guardadas. No hay una acción de borrado/reasignación automática.
+Los diagnósticos muestran número de lotes/reportes bloqueados, razón pública y
+presupuesto compartido; no exponen UUID, muestras, URL ni secretos. La resolución
+de los bloqueados requiere un procedimiento explícito que conserve su evidencia.
+
 La cadencia de sensores y sus relojes deben ser compatibles con los 30 segundos de
 frescura live del servidor. Conservar todos los reportes genera almacenamiento
 proporcional a su frecuencia; agruparlos reduce peticiones, no muestras.
