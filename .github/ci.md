@@ -3,7 +3,8 @@
 ## Comprobaciones
 
 Python 3.14 y uv gestionan las herramientas de desarrollo mediante `uv.lock`:
-Ruff 0.17.6 y pre-commit 4.7.0. No se instala Home Assistant ni se ejecutan tests.
+Ruff 0.17.6, pre-commit 4.7.0 y pytest-homeassistant-custom-component 0.13.375.
+Los tests usan Home Assistant 2026.10.3 fijado mediante override de uv.
 
 ```bash
 sh scripts/setup-hooks.sh
@@ -18,10 +19,10 @@ sha256sum. El entorno `.venv/` y los binarios `.local/` no se versionan.
 - Pre-commit: escaneo de secretos preparados y Ruff lint/formato sobre archivos
   Python preparados. pre-commit aparta los cambios sin preparar durante el hook.
   Si Ruff modifica archivos, revísalos, prepáralos y repite el commit.
-- Pre-push: lint, formato, compilación sintáctica y generación del ZIP.
+- Pre-push: lint, formato, compilación sintáctica, pytest con HA real y generación del ZIP.
 - CI: instalación bloqueada por `uv.lock`, escaneo de la ascendencia completa
   de `HEAD` (incluidos los cambios de merges),
-  comprobaciones estáticas, Hassfest y HACS en PR, `main`, tags y manualmente.
+  comprobaciones estáticas, pytest, Hassfest y HACS en PR, `main`, tags y manualmente.
 
 `sh scripts/check.sh` genera `dist/registros_camaras.zip`. La validación HACS no
 solicita inclusión en el catálogo y las releases conservan su publicación actual.

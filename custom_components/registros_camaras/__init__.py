@@ -2,11 +2,11 @@
 
 from homeassistant.const import CONF_API_KEY, CONF_URL, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import RegistrosClient
+from .api import ApiError, AuthenticationError, RegistrosClient
 from .const import CONF_CENTRE_ID, DEFAULT_CENTRE, DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
 from .services import async_register_services
@@ -31,14 +31,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) ->
     )
     coordinator = RegistrosCoordinator(hass, entry, client)
     await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.updates.start()
+    except AuthenticationError as err:
+        raise ConfigEntryAuthFailed("API key rejected") from err
+    except (ApiError, OSError, HomeAssistantError) as err:
+        raise ConfigEntryNotReady("Sensor update transport unavailable") from err
     entry.runtime_data = coordinator
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        await coordinator.updates.stop()
+        raise
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) -> bool:
     if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         return False
+    await entry.runtime_data.updates.stop()
     return True
 
 

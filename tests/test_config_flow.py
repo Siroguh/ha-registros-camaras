@@ -52,6 +52,17 @@ async def test_flow_errors(hass, client, error, code):
     assert result["errors"] == {"base": code}
 
 
+async def test_server_without_sensor_stream_is_rejected_during_configuration(
+    hass, client, stream_manifest
+):
+    stream_manifest.side_effect = IncompatibleApi("Sensor stream unavailable")
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": "user"}, data=DATA
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "incompatible_api"}
+
+
 async def test_reauth_and_legacy_migration(hass, client):
     entry = MockConfigEntry(
         domain=DOMAIN,
