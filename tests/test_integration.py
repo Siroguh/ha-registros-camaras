@@ -173,3 +173,94 @@ async def test_task_revision_zero_reaches_api_unchanged(hass, entry, client):
             return_response=True,
         )
         assert send.call_args.args[1]["task_revision"] == 0
+
+
+async def test_snapshot_cache_bounded_writes_flush_latest_and_restore_offline(
+    hass, entry, client, raw, stream_manifest
+):
+    await setup(hass, entry)
+    updates = entry.runtime_data.updates
+    with patch.object(updates.spool, "cache", wraps=updates.spool.cache) as cache:
+        for revision in range(8, 21):
+            raw["revision"] = revision
+            client.return_value = decode_snapshot(deepcopy(raw), DEFAULT_CENTRE)
+            await entry.runtime_data.async_refresh()
+            await hass.async_block_till_done()
+        assert entry.runtime_data.data.revision == 20
+        assert updates.spool.data["snapshot"]["revision"] == 7
+        assert cache.await_count == 0
+        # Wake the bounded cache writer at its next eligible interval.
+        updates.snapshot_next_write = 0
+        updates.write_ready.set()
+        await hass.async_block_till_done()
+        assert updates.spool.data["snapshot"]["revision"] == 20
+        assert cache.await_count == 1
+        raw["revision"] = 21
+        client.return_value = decode_snapshot(deepcopy(raw), DEFAULT_CENTRE)
+        await entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+        assert cache.await_count == 1
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        assert cache.await_count == 2
+    assert updates.snapshot_timer is None
+    client.side_effect = CannotConnect()
+    stream_manifest.side_effect = CannotConnect()
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    assert entry.runtime_data.data.revision == 21
+    assert not entry.runtime_data.last_update_success
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_failed_snapshot_cache_does_not_hide_accepted_command(hass, entry, client, raw):
+    await setup(hass, entry)
+    updates = entry.runtime_data.updates
+    updates.snapshot_next_write = 0
+    raw["revision"] = 8
+    client.return_value = decode_snapshot(raw, DEFAULT_CENTRE)
+    command = {
+        "config_entry_id": entry.entry_id,
+        "command_id": "00000000-0000-4000-8000-000000000123",
+        "expected_revision": 7,
+        "location_id": "cam-1",
+        "proposal_id": "proposal:7",
+    }
+    with (
+        patch.object(
+            entry.runtime_data.client, "command", new=AsyncMock(return_value={"version": 8})
+        ),
+        patch.object(updates.spool, "cache", side_effect=HomeAssistantError("cache write failed")),
+    ):
+        result = await hass.services.async_call(
+            DOMAIN, "confirm_proposal", command, blocking=True, return_response=True
+        )
+        await hass.async_block_till_done()
+        assert result == {"version": 8}
+        assert updates.snapshot_pending["revision"] == 8
+        assert updates.spool.data["snapshot"]["revision"] == 7
+        assert updates.cache_error == "Dashboard cache pending (HomeAssistantError)"
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert updates.spool.data["snapshot"]["revision"] == 8
+
+
+async def test_native_root_device_id_preserves_entity_identity_on_reload(
+    hass, entry, client, caplog
+):
+    from homeassistant.helpers import device_registry as dr
+
+    await setup(hass, entry)
+    registry = dr.async_get(hass)
+    root = registry.async_get_device_by_identifier((DOMAIN, entry.entry_id), entry.entry_id)
+    chamber = registry.async_get_device_by_identifier(
+        (DOMAIN, f"{entry.entry_id}_cam-1"), entry.entry_id
+    )
+    assert chamber.via_device_id == root.id
+    before = entity_id(hass, entry, "sensor", "cam-1", "quantity")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entity_id(hass, entry, "sensor", "cam-1", "quantity") == before
+    assert (
+        registry.async_get_device_by_identifier((DOMAIN, entry.entry_id), entry.entry_id).id
+        == root.id
+    )
+    assert "deprecated `via_device`" not in caplog.text
+    assert await hass.config_entries.async_unload(entry.entry_id)

@@ -30,10 +30,13 @@ class RegistrosCoordinator(DataUpdateCoordinator[Snapshot]):
         )
         self.client = client
         self.updates = Updates(hass, entry, client)
+        self.root_device_id: str | None = None
 
     async def _async_update_data(self) -> Snapshot:
         try:
-            return await self.client.snapshot()
+            snapshot = await self.client.snapshot()
+            self.updates.stage_snapshot(snapshot.raw)
+            return snapshot
         except AuthenticationError as err:
             raise ConfigEntryAuthFailed("API key rejected") from err
         except ApiError as err:

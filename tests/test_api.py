@@ -237,3 +237,75 @@ sys.exit(1)
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({}, "blocked"),
+        ({"commandId": "another-command"}, "pending"),
+        ({"accepted": True}, "pending"),
+        ({"accepted": 0}, "pending"),
+        ({"apiVersion": True}, "pending"),
+        ({"reason": "private response detail"}, "pending"),
+        ({"_tag": "ProcessInvalid"}, "pending"),
+    ],
+)
+async def test_only_command_bound_domain_rejection_can_block_updates(
+    aiohttp_client, socket_enabled, change, expected
+):
+    from custom_components.registros_camaras.api import UpdatesRejected
+
+    command_id = "00000000-0000-4000-8000-000000000123"
+    rejection = {
+        "_tag": "SensorUpdatesRejected",
+        "apiVersion": 1,
+        "commandId": command_id,
+        "reason": "assignment_window",
+        "accepted": False,
+        **change,
+    }
+
+    async def route(request):
+        assert request.headers["Authorization"] == "Bearer test-key"
+        assert (await request.json())["commandId"] == command_id
+        return web.json_response(rejection, status=422)
+
+    app = web.Application()
+    app.router.add_post("/api/environment/updates", route)
+    http = await aiohttp_client(app)
+    client = RegistrosClient(http.session, str(http.make_url("/")), "test-key", DEFAULT_CENTRE)
+    error = UpdatesRejected if expected == "blocked" else IncompatibleApi
+    with pytest.raises(error) as caught:
+        await client.push_updates({"commandId": command_id})
+    assert "private response detail" not in str(caught.value)
+    if expected == "blocked":
+        assert caught.value.command_id == command_id
+        assert caught.value.reason == "assignment_window"
+
+
+@pytest.mark.parametrize("status", [400, 409, 500])
+async def test_untrusted_status_never_proves_batch_rejection(
+    aiohttp_client, socket_enabled, status
+):
+    from custom_components.registros_camaras.api import ApiError, UpdatesRejected
+
+    async def route(request):
+        return web.json_response(
+            {
+                "_tag": "SensorUpdatesRejected",
+                "apiVersion": 1,
+                "commandId": "id",
+                "reason": "assignment_window",
+                "accepted": False,
+            },
+            status=status,
+        )
+
+    app = web.Application()
+    app.router.add_post("/api/environment/updates", route)
+    http = await aiohttp_client(app)
+    client = RegistrosClient(http.session, str(http.make_url("/")), "test-key", DEFAULT_CENTRE)
+    with pytest.raises(ApiError) as caught:
+        await client.push_updates({"commandId": "id"})
+    assert not isinstance(caught.value, UpdatesRejected)
