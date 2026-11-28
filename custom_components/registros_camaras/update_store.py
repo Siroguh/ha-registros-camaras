@@ -14,6 +14,11 @@ from homeassistant.helpers.storage import Store
 MAX_REPORTS = 50000
 MEMORY_REPORTS = 10000
 SEGMENT_REPORTS = 1000
+MAX_INCOMPLETE_REPORTS = 1000
+
+
+def incomplete_history(row: dict) -> bool:
+    return row["mode"] == "history" and row["status"] == "valid" and not row["unit"]
 
 
 def identity(source: str, row: dict) -> tuple[str, str, str]:
@@ -255,8 +260,14 @@ class UpdateStore:
                 added.append([source, deepcopy(row)])
             # Reserve enough space to flush the bounded RAM buffer during unload.
             capacity = MAX_REPORTS + (MEMORY_REPORTS if shutdown else 0)
-            if len(self.data["rows"]) + len(added) > capacity:
+            incomplete = sum(incomplete_history(row) for row in known.values())
+            if len(known) - incomplete > capacity:
                 raise HomeAssistantError("Sensor update queue capacity reached")
+            # Incomplete history cannot consume live delivery capacity. Preserve any
+            # larger pre-upgrade reserve, but never grow it or advance a failed cursor.
+            prior_incomplete = sum(incomplete_history(row) for _, row in self.data["rows"])
+            if incomplete > max(MAX_INCOMPLETE_REPORTS, prior_incomplete):
+                raise HomeAssistantError("Incomplete sensor history capacity reached")
             cursors = {**self.data["cursors"]}
             if cursor:
                 cursors[cursor[0]] = max(cursors.get(cursor[0], 0), cursor[1])
@@ -290,9 +301,7 @@ class UpdateStore:
                 return None
             # Do not freeze a valid historical value without the unit needed to interpret it.
             eligible = [
-                (origin, row)
-                for origin, row in self.data["rows"]
-                if not (row["mode"] == "history" and row["status"] == "valid" and not row["unit"])
+                (origin, row) for origin, row in self.data["rows"] if not incomplete_history(row)
             ]
             if not eligible:
                 return None
@@ -319,3 +328,6 @@ class UpdateStore:
 
     async def size(self) -> int:
         return len(self.data["rows"])
+
+    async def deliverable_size(self) -> int:
+        return sum(not incomplete_history(row) for _, row in self.data["rows"])

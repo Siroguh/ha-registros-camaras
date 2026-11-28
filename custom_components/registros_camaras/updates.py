@@ -93,7 +93,7 @@ class Updates:
         await self.spool.bind(destination)
         self.prepared = True
         self.queue_size = await self.spool.size()
-        self.paused = self.queue_size >= MAX_REPORTS
+        self.paused = await self.spool.deliverable_size() >= MAX_REPORTS
         if "manifest" in self.spool.data:
             # Install listeners before either HTTP request can wait on an offline server.
             await self.apply_manifest(self.spool.data["manifest"])
@@ -101,7 +101,7 @@ class Updates:
     async def start(self) -> None:
         await self.prepare()
         self.queue_size = await self.spool.size()
-        self.paused = self.queue_size >= MAX_REPORTS
+        self.paused = await self.spool.deliverable_size() >= MAX_REPORTS
         try:
             await self.refresh()
         except CannotConnect:
@@ -263,7 +263,7 @@ class Updates:
                 for _ in rows:
                     self.pending.popleft()
                 self.send_ready.set()
-                if self.paused and await self.spool.size() < MAX_REPORTS:
+                if self.paused and await self.spool.deliverable_size() < MAX_REPORTS:
                     self.paused = False
                     self.subscribe()
 
@@ -277,7 +277,7 @@ class Updates:
                 try:
                     batch = await self.spool.next_batch(self.client.centre_id)
                     self.queue_size = await self.spool.size()
-                    if self.queue_size >= MAX_REPORTS:
+                    if await self.spool.deliverable_size() >= MAX_REPORTS:
                         self.paused = True
                         self.unsubscribe()
                         self.recovery_error = (
@@ -317,7 +317,7 @@ class Updates:
         async with asyncio.timeout(30):
             await committed
         more = False
-        if await self.spool.size() >= MAX_REPORTS:
+        if await self.spool.deliverable_size() >= MAX_REPORTS:
             return False
         for assignment in self.assignments:
             if self.stopping:

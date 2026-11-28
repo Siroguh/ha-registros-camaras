@@ -1049,6 +1049,100 @@ async def test_real_recorder_missing_unit_preserves_live_payload_and_cursor(
         updates.unsubscribe()
 
 
+@pytest.mark.parametrize("restored_limit", [1, 2])
+async def test_real_recorder_incomplete_reserve_never_pauses_live_capture(
+    recorder_db_url,
+    hass,
+    entry,
+    async_setup_recorder_instance,
+    tmp_path,
+    real_storage,
+    client,
+    stream_manifest,
+    restored_limit,
+):
+    from homeassistant.exceptions import HomeAssistantError
+
+    await async_setup_recorder_instance(
+        hass,
+        {
+            "db_url": f"sqlite:///{tmp_path / 'recorder.db'}",
+            "commit_interval": 60,
+        },
+    )
+    hass.config.external_url = ASSIGNMENT["source"]
+    stream_manifest.return_value["assignments"] = [ASSIGNMENT]
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.assignments = [ASSIGNMENT]
+    at = datetime.now(UTC)
+    for offset, value in [(20, "20"), (19, "21")]:
+        with patch(
+            "homeassistant.core.time.time",
+            return_value=(at - timedelta(seconds=offset)).timestamp(),
+        ):
+            hass.states.async_set(
+                ASSIGNMENT["entityId"], value, {"unit_of_measurement": "°C", "large": "x" * 17000}
+            )
+            await hass.async_block_till_done()
+    await updates.spool.ensure_cursor(
+        ASSIGNMENT["id"], int((at - timedelta(seconds=21)).timestamp() * 1000)
+    )
+    with patch("custom_components.registros_camaras.update_store.MAX_INCOMPLETE_REPORTS", 2):
+        await updates.recover()
+    cursor = await updates.spool.cursor(ASSIGNMENT["id"], 0)
+    assert await updates.spool.size() == 2
+    assert await updates.spool.deliverable_size() == 0
+    assert await updates.spool.next_batch("centre") is None
+    hass.states.async_set(
+        ASSIGNMENT["entityId"], "22", {"unit_of_measurement": "°C", "large": "x" * 17000}
+    )
+    await hass.async_block_till_done()
+    with (
+        patch(
+            "custom_components.registros_camaras.update_store.MAX_INCOMPLETE_REPORTS",
+            restored_limit,
+        ),
+        patch("custom_components.registros_camaras.updates.datetime") as clock,
+    ):
+        clock.now.return_value = at + timedelta(seconds=20)
+        clock.fromtimestamp.side_effect = datetime.fromtimestamp
+        with pytest.raises(HomeAssistantError, match="Incomplete sensor history capacity"):
+            await updates.recover()
+    assert await updates.spool.cursor(ASSIGNMENT["id"], 0) == cursor
+    sent = asyncio.Event()
+    original_wait = Updates.wait
+
+    async def wait(instance, seconds):
+        await original_wait(instance, 0 if seconds == 2 else seconds)
+
+    async def push(batch):
+        assert [row["value"] for row in batch["readings"]] == [23]
+        sent.set()
+
+    with (
+        patch("custom_components.registros_camaras.updates.MAX_REPORTS", 2),
+        patch("custom_components.registros_camaras.update_store.MAX_REPORTS", 2),
+        patch(
+            "custom_components.registros_camaras.update_store.MAX_INCOMPLETE_REPORTS",
+            restored_limit,
+        ),
+        patch.object(Updates, "wait", wait),
+        patch.object(RegistrosClient, "push_updates", side_effect=push),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        restored = entry.runtime_data.updates
+        assert not restored.paused
+        assert restored.unsubscribers
+        hass.states.async_set(ASSIGNMENT["entityId"], "23", {"unit_of_measurement": "°C"})
+        await asyncio.wait_for(sent.wait(), 5)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    reopened = UpdateStore(hass, entry.entry_id)
+    await reopened.initialize()
+    assert [row["value"] for _, row in reopened.data["rows"]] == [20, 21]
+    assert cursor <= await reopened.cursor(ASSIGNMENT["id"], 0) < int(at.timestamp() * 1000)
+
+
 async def test_incomplete_history_does_not_block_other_reports_or_weaken_conflicts(
     hass, real_storage
 ):
