@@ -17,12 +17,25 @@ SEGMENT_REPORTS = 1000
 MAX_INCOMPLETE_REPORTS = 1000
 
 
+class ReportCapacityFull(HomeAssistantError):
+    """The bounded delivered-or-blocked report budget is full."""
+
+
 def incomplete_history(row: dict) -> bool:
     return row["mode"] == "history" and row["status"] == "valid" and not row["unit"]
 
 
 class IncompleteHistoryFull(HomeAssistantError):
     """The incomplete-history reserve cannot accept this recovery window."""
+
+
+class UpdateIndexStore(Store):
+    """v2 prevents old clients from resending quarantined rows with new commands."""
+
+    async def _async_migrate_func(self, old_major_version, old_minor_version, old_data):
+        if old_major_version != 1:
+            raise HomeAssistantError("Unsupported sensor queue version")
+        return old_data
 
 
 def identity(source: str, row: dict) -> tuple[str, str, str]:
@@ -43,12 +56,22 @@ class UpdateStore:
         self.garbage: set[str] = set()
         self.cache_key: str | None = None
         self.cached: dict = {}
+        self.blocked_batches: dict[str, dict] = {}
 
     def make_store(self, key: str | None = None) -> Store:
+        if key is None or key == self.key:
+            return UpdateIndexStore(
+                self.hass,
+                2,
+                self.key,
+                private=True,
+                atomic_writes=True,
+                serialize_in_event_loop=False,
+            )
         return Store(
             self.hass,
             1,
-            key or self.key,
+            key,
             private=True,
             atomic_writes=True,
             serialize_in_event_loop=False,
@@ -79,6 +102,11 @@ class UpdateStore:
             ):
                 raise HomeAssistantError("Invalid stored sensor update queue")
             self.data = value
+            for blocked in value.get("blocked", []):
+                frozen = await self.make_store(blocked["key"]).async_load()
+                if not isinstance(frozen, dict) or frozen.get("commandId") != blocked["commandId"]:
+                    raise HomeAssistantError("Missing blocked sensor batch")
+                self.blocked_batches[blocked["key"]] = frozen
             self.cache_key = value.get("cache_key")
             if self.cache_key:
                 cached = await self.make_store(self.cache_key).async_load()
@@ -95,12 +123,13 @@ class UpdateStore:
         return {path.name for path in root.glob(f"{self.key}.segment.*")} | {
             f"{self.key}.files/{path.name}"
             for path in (root / f"{self.key}.files").glob("*")
-            if path.name.startswith(("segment.", "cache."))
+            if path.name.startswith(("segment.", "cache.", "blocked."))
         }
 
     async def cleanup(self) -> None:
         self.garbage.difference_update(d["key"] for d, _ in self.segments)
         self.garbage.discard(self.cache_key)
+        self.garbage.difference_update(b["key"] for b in self.data.get("blocked", []))
         for key in list(self.garbage):
             try:
                 await self.make_store(key).async_remove()
@@ -143,7 +172,17 @@ class UpdateStore:
         remaining = {identity(*item): item for item in data["rows"]}
         known = set()
         segments = []
+        regroup = set()
+        for _, items in self.segments:
+            groups = {(source, row["assignmentId"]) for source, row in items}
+            if len(groups) > 1:
+                regroup.update(groups)
         for descriptor, items in self.segments:
+            if (items[0][0], items[0][1]["assignmentId"]) in regroup:
+                # Migrate every segment of a legacy mixed group in original row order,
+                # including pure tails. Otherwise an old tail could precede its head.
+                # Original files survive until the new index is verified below.
+                continue
             start = descriptor["start"]
             while start < len(items) and identity(*items[start]) not in remaining:
                 start += 1
@@ -159,14 +198,18 @@ class UpdateStore:
                     start = 0
                 segments.append(({**descriptor, "start": start}, items))
                 known.update(identity(*item) for item in items[start:])
-        added: dict[str, list] = {}
+        added: dict[tuple[str, str], list] = {}
         for item in data["rows"]:
             if identity(*item) not in known:
-                added.setdefault(item[0], []).append(item)
-        for source, items in added.items():
-            # Copy only the incomplete tail of this source; ACK never rewrites samples.
+                added.setdefault((item[0], item[1]["assignmentId"]), []).append(item)
+        for group, items in added.items():
+            # Match delivery's source + assignment boundary so ACKs trim prefixes.
             tail = next(
-                (i for i in range(len(segments) - 1, -1, -1) if segments[i][1][0][0] == source),
+                (
+                    i
+                    for i in range(len(segments) - 1, -1, -1)
+                    if (segments[i][1][0][0], segments[i][1][0][1]["assignmentId"]) == group
+                ),
                 None,
             )
             if tail is not None:
@@ -266,7 +309,7 @@ class UpdateStore:
             capacity = MAX_REPORTS + (MEMORY_REPORTS if shutdown else 0)
             incomplete = sum(incomplete_history(row) for row in known.values())
             if len(known) - incomplete > capacity:
-                raise HomeAssistantError("Sensor update queue capacity reached")
+                raise ReportCapacityFull("Sensor update queue capacity reached")
             # Incomplete history cannot consume live delivery capacity. Preserve any
             # larger pre-upgrade reserve, but never grow it or advance a failed cursor.
             prior_incomplete = sum(incomplete_history(row) for _, row in self.data["rows"])
@@ -304,13 +347,20 @@ class UpdateStore:
             if not self.data["rows"]:
                 return None
             # Do not freeze a valid historical value without the unit needed to interpret it.
+            blocked = self.blocked_identities()
             eligible = [
-                (origin, row) for origin, row in self.data["rows"] if not incomplete_history(row)
+                (origin, row)
+                for origin, row in self.data["rows"]
+                if not incomplete_history(row) and identity(origin, row) not in blocked
             ]
             if not eligible:
                 return None
-            source = eligible[0][0]
-            rows = [row for origin, row in eligible if origin == source][:100]
+            source, first = eligible[0]
+            rows = [
+                row
+                for origin, row in eligible
+                if origin == source and row["assignmentId"] == first["assignmentId"]
+            ][:100]
             batch = {
                 "apiVersion": 1,
                 "commandId": str(uuid4()),
@@ -320,6 +370,54 @@ class UpdateStore:
             }
             await self.save({**self.data, "batch": batch})
             return deepcopy(batch)
+
+    def blocked_identities(self) -> set[tuple[str, str, str]]:
+        return {
+            identity(batch["source"], row)
+            for descriptor in self.data.get("blocked", [])
+            for batch in (self.blocked_batches[descriptor["key"]],)
+            for row in batch["readings"]
+        }
+
+    async def block(self, command_id: str, reason: str) -> None:
+        """Retain a definitively rejected command unchanged; this is never an ACK.
+
+        Blocked rows continue to occupy the same MAX_REPORTS + shutdown reserve.
+        Each descriptor owns at least one row, bounding files/batches as well as
+        samples. Reaching that total budget pauses capture, not healthy delivery.
+        """
+        async with self.lock:
+            batch = self.data["batch"]
+            if batch is None or batch["commandId"] != command_id or reason != "assignment_window":
+                raise ValueError("Unverified sensor batch rejection")
+            key = f"{self.key}.files/blocked.{command_id}"
+            self.garbage.add(key)
+            self.blocked_batches[key] = deepcopy(batch)
+            await self.verified_save(self.make_store(key), self.blocked_batches[key])
+            await self.save(
+                {
+                    **self.data,
+                    "batch": None,
+                    "blocked": [
+                        *self.data.get("blocked", []),
+                        {"key": key, "commandId": command_id, "reason": reason},
+                    ],
+                }
+            )
+
+    def blocked_diagnostics(self) -> dict:
+        blocked_reports = len(self.blocked_identities())
+        return {
+            "blocked_batches": len(self.data.get("blocked", [])),
+            "blocked_reports": blocked_reports,
+            "blocked_reasons": {"assignment_window": len(self.data.get("blocked", []))},
+            "blocked_report_capacity": MAX_REPORTS + MEMORY_REPORTS,
+            "blocked_capacity_shared_with_queue": True,
+            "pending_delivery_reports": sum(
+                not incomplete_history(row) for _, row in self.data["rows"]
+            )
+            - blocked_reports,
+        }
 
     async def acknowledge(self, command_id: str) -> None:
         async with self.lock:
@@ -334,4 +432,5 @@ class UpdateStore:
         return len(self.data["rows"])
 
     async def deliverable_size(self) -> int:
+        """Occupied delivery budget, including blocked rows until explicitly resolved."""
         return sum(not incomplete_history(row) for _, row in self.data["rows"])

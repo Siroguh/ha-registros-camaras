@@ -3,7 +3,8 @@
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from copy import deepcopy
+from datetime import UTC, datetime
 import hashlib
 import json
 import logging
@@ -20,14 +21,22 @@ from homeassistant.helpers.event import (
     async_track_state_report_event,
 )
 
-from .api import CannotConnect, IncompatibleApi, RegistrosClient, normalize_url
+from .api import CannotConnect, IncompatibleApi, RegistrosClient, UpdatesRejected, normalize_url
 from .const import CONF_CENTRE_ID, DOMAIN
-from .update_store import MAX_REPORTS, MEMORY_REPORTS, IncompleteHistoryFull, UpdateStore
+from .history import HistoryWindowFull, read_page
+from .update_store import (
+    MAX_REPORTS,
+    MEMORY_REPORTS,
+    IncompleteHistoryFull,
+    ReportCapacityFull,
+    UpdateStore,
+)
 
 if TYPE_CHECKING:
     from .coordinator import RegistrosConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+SNAPSHOT_INTERVAL_SECONDS = 60
 
 
 def reading(assignment: dict, state, at: datetime, mode: str) -> dict:
@@ -68,6 +77,7 @@ class Updates:
         self.unsubscribers: list[Callable[[], None]] = []
         self.tasks: list[asyncio.Task] = []
         self.write_ready = asyncio.Event()
+        self.capacity_ready = asyncio.Event()
         self.send_ready = asyncio.Event()
         self.stop_ready = asyncio.Event()
         self.stopping = False
@@ -80,6 +90,11 @@ class Updates:
         self.prepared = False
         self.change_counts: dict[str, tuple[datetime, dict[str, int]]] = {}
         self.stop_task: asyncio.Task | None = None
+        self.snapshot_pending: dict | None = None
+        self.snapshot_next_write = 0.0
+        self.snapshot_timer: asyncio.TimerHandle | None = None
+        self.cache_error: str | None = None
+        self.recovery_offset = 0
 
     async def prepare(self) -> None:
         if self.prepared:
@@ -135,8 +150,12 @@ class Updates:
 
     async def stop(self) -> None:
         self.stopping = True
+        if self.snapshot_timer is not None:
+            self.snapshot_timer.cancel()
+            self.snapshot_timer = None
         self.unsubscribe()
         self.stop_ready.set()
+        self.capacity_ready.set()
         self.write_ready.set()
         self.send_ready.set()
         if self.stop_task is None or (
@@ -161,11 +180,39 @@ class Updates:
         if self.pending:
             await self.spool.append(list(self.pending), shutdown=True)
             self.pending.clear()
+        await self.flush_snapshot()
         await asyncio.gather(*self.tasks[1:], return_exceptions=True)
+
+    @callback
+    def stage_snapshot(self, snapshot: dict) -> None:
+        """Coalesce only the rebuildable dashboard cache, never sensor reports."""
+        self.snapshot_pending = deepcopy(snapshot)
+        self.write_ready.set()
+
+    async def flush_snapshot(self) -> None:
+        snapshot = self.snapshot_pending
+        if snapshot is not None:
+            await self.spool.cache(snapshot=snapshot)
+            if self.snapshot_pending is snapshot:
+                self.snapshot_pending = None
+            self.snapshot_next_write = self.hass.loop.time() + SNAPSHOT_INTERVAL_SECONDS
+            self.cache_error = None
+
+    def schedule_snapshot(self, delay: float) -> None:
+        if self.snapshot_timer is not None:
+            self.snapshot_timer.cancel()
+        self.snapshot_timer = self.hass.loop.call_later(delay, self.write_ready.set)
 
     async def wait(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self.stop_ready.wait(), seconds)
+        except TimeoutError:
+            pass
+
+    async def wait_for_capacity(self) -> None:
+        """A durable ACK or shutdown interrupts capacity retry, not storage backoff."""
+        try:
+            await asyncio.wait_for(self.capacity_ready.wait(), 30)
         except TimeoutError:
             pass
 
@@ -250,10 +297,40 @@ class Updates:
         while not self.stopping:
             await self.write_ready.wait()
             self.write_ready.clear()
-            while self.pending and not self.stopping:
+            while not self.stopping:
+                # Service the cache between report attempts, even if capacity stays full.
+                # A due snapshot staged during the 30s retry wait gets a turn on retry.
+                if self.snapshot_pending is not None:
+                    delay = self.snapshot_next_write - self.hass.loop.time()
+                    if delay > 0:
+                        self.schedule_snapshot(delay)
+                    else:
+                        try:
+                            await self.flush_snapshot()
+                        except Exception as err:
+                            self.cache_error = f"Dashboard cache pending ({type(err).__name__})"
+                            self.snapshot_next_write = self.hass.loop.time() + 30
+                            self.schedule_snapshot(30)
+                if not self.pending or self.stopping:
+                    break
+                # Clear before checking capacity so a concurrent ACK cannot be lost.
+                self.capacity_ready.clear()
                 rows = list(self.pending)[:1000]
                 try:
-                    await self.spool.append(rows)
+                    while True:
+                        try:
+                            await self.spool.append(rows)
+                            break
+                        except ReportCapacityFull:
+                            # Blocked rows may leave less space than this chunk forever.
+                            # Only a successfully committed prefix can leave RAM.
+                            if len(rows) == 1:
+                                raise
+                            rows = rows[: len(rows) // 2]
+                except ReportCapacityFull:
+                    self.error = "Local persistence pending (ReportCapacityFull)"
+                    await self.wait_for_capacity()
+                    continue
                 except Exception as err:
                     # Never remove a report when persistence fails.
                     self.error = f"Local persistence failed ({type(err).__name__})"
@@ -288,8 +365,13 @@ class Updates:
                         self.subscribe()
                     if batch is None:
                         break
-                    await self.client.push_updates(batch)
-                    await self.spool.acknowledge(batch["commandId"])
+                    try:
+                        await self.client.push_updates(batch)
+                    except UpdatesRejected as err:
+                        await self.spool.block(err.command_id, err.reason)
+                    else:
+                        await self.spool.acknowledge(batch["commandId"])
+                        self.capacity_ready.set()
                     retry = 1.0
                     self.error = None
                 except Exception as err:
@@ -305,7 +387,6 @@ class Updates:
             )
             return False
         from homeassistant.components.recorder import get_instance
-        from homeassistant.components.recorder.history import get_significant_states
         from homeassistant.components.recorder.tasks import SynchronizeTask
 
         until = int(datetime.now(UTC).timestamp() * 1000) - 10000
@@ -320,7 +401,11 @@ class Updates:
         self.recovery_error = None
         if await self.spool.deliverable_size() >= MAX_REPORTS:
             return False
-        for assignment in self.assignments:
+        assignments = (
+            self.assignments[self.recovery_offset :] + self.assignments[: self.recovery_offset]
+        )
+        self.recovery_offset = (self.recovery_offset + 1) % max(1, len(self.assignments))
+        for assignment in assignments:
             if self.stopping:
                 return False
             target = min(until, assignment["endsAt"] or until)
@@ -330,21 +415,19 @@ class Updates:
             end = min(target, start + 300000)
             if end <= start:
                 continue
-            groups = await recorder.async_add_executor_job(
-                lambda a=assignment, s=start, e=end: get_significant_states(
-                    self.hass,
-                    datetime.fromtimestamp(s / 1000, UTC) - timedelta(milliseconds=1),
-                    datetime.fromtimestamp(e / 1000, UTC),
-                    [a["entityId"]],
-                    significant_changes_only=False,
-                    include_start_time_state=False,
-                    minimal_response=False,
-                    no_attributes=False,
+            try:
+                page = await recorder.async_add_executor_job(
+                    read_page, self.hass, assignment["entityId"], start, end
                 )
-            )
+            except HistoryWindowFull:
+                self.recovery_error = (
+                    "Coincident Recorder group exceeds page capacity; window pending"
+                )
+                continue
+            end = page.end
             rows = []
             counts: dict[str, int] = {}
-            for state in groups.get(assignment["entityId"], []):
+            for state in page.states:
                 if not start <= int(state.last_updated.timestamp() * 1000) < end:
                     continue
                 row = reading(assignment, state, state.last_updated, "history")
@@ -355,9 +438,23 @@ class Updates:
                     row["sourceEventId"] += f":occurrence:{occurrence}"
                 rows.append((assignment["source"], row))
             try:
-                await self.spool.append(rows, (assignment["id"], end))
+                while True:
+                    try:
+                        await self.spool.append(rows, (assignment["id"], end))
+                        break
+                    except ReportCapacityFull:
+                        # Trim at a whole millisecond, never re-number occurrences
+                        # within a timestamp or advance past an unpersisted row.
+                        boundary = rows[len(rows) // 2][1]["observedAt"] if rows else start
+                        if boundary <= start:
+                            raise
+                        end = boundary
+                        rows = [item for item in rows if item[1]["observedAt"] < end]
             except IncompleteHistoryFull:
                 self.recovery_error = "Incomplete sensor history capacity reached; window pending"
+                continue
+            except ReportCapacityFull:
+                self.recovery_error = "Sensor history capacity reached; window pending"
                 continue
             more = more or end < target
             if rows:
@@ -382,11 +479,14 @@ class Updates:
 
     def diagnostics(self) -> dict:
         return {
-            "queued": self.queue_size,
+            "queued": len(self.spool.data["rows"]),
             "queue_capacity": MAX_REPORTS,
             "awaiting_local_persistence": len(self.pending),
             "capture_paused": self.paused,
             "delivery_error": self.error,
             "recovery_error": self.recovery_error,
             "capture_overflows": self.unrecoverable_reports,
+            "dashboard_cache_pending": self.snapshot_pending is not None,
+            "dashboard_cache_error": self.cache_error,
+            **self.spool.blocked_diagnostics(),
         }
