@@ -77,6 +77,7 @@ class Updates:
         self.unsubscribers: list[Callable[[], None]] = []
         self.tasks: list[asyncio.Task] = []
         self.write_ready = asyncio.Event()
+        self.capacity_ready = asyncio.Event()
         self.send_ready = asyncio.Event()
         self.stop_ready = asyncio.Event()
         self.stopping = False
@@ -154,6 +155,7 @@ class Updates:
             self.snapshot_timer = None
         self.unsubscribe()
         self.stop_ready.set()
+        self.capacity_ready.set()
         self.write_ready.set()
         self.send_ready.set()
         if self.stop_task is None or (
@@ -204,6 +206,13 @@ class Updates:
     async def wait(self, seconds: float) -> None:
         try:
             await asyncio.wait_for(self.stop_ready.wait(), seconds)
+        except TimeoutError:
+            pass
+
+    async def wait_for_capacity(self) -> None:
+        """A durable ACK or shutdown interrupts capacity retry, not storage backoff."""
+        try:
+            await asyncio.wait_for(self.capacity_ready.wait(), 30)
         except TimeoutError:
             pass
 
@@ -304,6 +313,8 @@ class Updates:
                             self.schedule_snapshot(30)
                 if not self.pending or self.stopping:
                     break
+                # Clear before checking capacity so a concurrent ACK cannot be lost.
+                self.capacity_ready.clear()
                 rows = list(self.pending)[:1000]
                 try:
                     while True:
@@ -316,6 +327,10 @@ class Updates:
                             if len(rows) == 1:
                                 raise
                             rows = rows[: len(rows) // 2]
+                except ReportCapacityFull:
+                    self.error = "Local persistence pending (ReportCapacityFull)"
+                    await self.wait_for_capacity()
+                    continue
                 except Exception as err:
                     # Never remove a report when persistence fails.
                     self.error = f"Local persistence failed ({type(err).__name__})"
@@ -356,6 +371,7 @@ class Updates:
                         await self.spool.block(err.command_id, err.reason)
                     else:
                         await self.spool.acknowledge(batch["commandId"])
+                        self.capacity_ready.set()
                     retry = 1.0
                     self.error = None
                 except Exception as err:

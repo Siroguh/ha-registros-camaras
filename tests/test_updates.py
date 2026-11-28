@@ -1598,19 +1598,15 @@ async def test_real_storage_full_queue_retries_cache_without_starvation(
     updates.pending.append(pending)
     retries = asyncio.Queue()
     resume = asyncio.Event()
-    original_wait = updates.wait
 
-    async def retry_handshake(seconds):
-        if asyncio.current_task() is not updates.tasks[0]:
-            await original_wait(seconds)
-            return
-        await retries.put(seconds)
+    async def retry_handshake():
+        await retries.put(30)
         await resume.wait()
         resume.clear()
 
     with (
         patch("custom_components.registros_camaras.update_store.MAX_REPORTS", 1),
-        patch.object(updates, "wait", side_effect=retry_handshake),
+        patch.object(updates, "wait_for_capacity", side_effect=retry_handshake),
         patch.object(updates.spool, "cache", wraps=updates.spool.cache) as cache,
     ):
         try:
@@ -1786,23 +1782,28 @@ async def test_full_queue_writer_commits_fitting_live_prefix_and_delivers_in_ord
     delivered = []
     completed = asyncio.Event()
     original_ack = updates.spool.acknowledge
+    original_append = updates.spool.append
+    ack_times = []
+    persisted_times = []
 
     async def push(batch):
         delivered.extend(batch["readings"])
 
     async def acknowledged(command_id):
         await original_ack(command_id)
+        ack_times.append(hass.loop.time())
         if len(delivered) == 2:
             completed.set()
 
-    async def fast_wait(_seconds):
-        await asyncio.sleep(0.01)
+    async def persisted(rows, **kwargs):
+        await original_append(rows, **kwargs)
+        persisted_times.append(hass.loop.time())
 
     with (
         patch("custom_components.registros_camaras.update_store.MAX_REPORTS", 2),
-        patch.object(updates, "wait", side_effect=fast_wait),
         patch.object(client, "push_updates", side_effect=push),
         patch.object(updates.spool, "acknowledge", side_effect=acknowledged),
+        patch.object(updates.spool, "append", side_effect=persisted),
     ):
         updates.tasks = [
             asyncio.create_task(updates.write_loop()),
@@ -1810,7 +1811,10 @@ async def test_full_queue_writer_commits_fitting_live_prefix_and_delivers_in_ord
         ]
         updates.write_ready.set()
         try:
-            await asyncio.wait_for(completed.wait(), 2)
+            # Production waits: the 2s batching delay remains, capacity retry is 30s.
+            await asyncio.wait_for(completed.wait(), 6)
+            assert len(persisted_times) == 2
+            assert 0 <= persisted_times[1] - ack_times[0] < 1
             assert not updates.pending
             restored = UpdateStore(hass, entry.entry_id)
             await restored.initialize()
@@ -1820,6 +1824,50 @@ async def test_full_queue_writer_commits_fitting_live_prefix_and_delivers_in_ord
             assert await restored.next_batch("centre") is None
         finally:
             await updates.stop()
+
+
+async def test_capacity_signal_does_not_interrupt_real_storage_error_backoff(
+    hass, entry, real_storage
+):
+    from homeassistant.util.file import WriteError
+
+    updates = Updates(hass, entry, AsyncMock())
+    await updates.spool.initialize()
+    updates.pending.append((ASSIGNMENT["source"], sample()))
+    entered = asyncio.Event()
+    returned = asyncio.Event()
+    original_wait = updates.wait
+    original_write = Store._async_write_data
+
+    async def observe_wait(seconds):
+        assert seconds == 30
+        entered.set()
+        await original_wait(seconds)
+        returned.set()
+
+    async def fail_segment(store, data):
+        if "/segment." in store.key:
+            raise WriteError("fixture disk error")
+        await original_write(store, data)
+
+    with patch.object(updates, "wait", side_effect=observe_wait):
+        try:
+            with patch.object(Store, "_async_write_data", fail_segment):
+                updates.tasks = [asyncio.create_task(updates.write_loop())]
+                updates.write_ready.set()
+                await asyncio.wait_for(entered.wait(), 5)
+                assert updates.error == "Local persistence failed (HomeAssistantError)"
+                updates.capacity_ready.set()
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(returned.wait(), 0.1)
+                assert list(updates.pending) == [(ASSIGNMENT["source"], sample())]
+                assert await updates.spool.size() == 0
+        finally:
+            # Shutdown interrupts the genuine 30s backoff and flushes the report.
+            await asyncio.wait_for(updates.stop(), 5)
+    restored = UpdateStore(hass, entry.entry_id)
+    await restored.initialize()
+    assert restored.data["rows"] == [[ASSIGNMENT["source"], sample()]]
 
 
 async def test_initial_cache_write_failure_remains_setup_retry_and_recovers(

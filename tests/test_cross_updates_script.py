@@ -79,9 +79,9 @@ async def test_cross_script_real_http_and_native_store(aiohttp_client, socket_en
         return web.json_response(
             {
                 "commandId": command_id,
-                "stream": f"ReadingIngestion/{command_id}",
-                "eventId": f"ReadingIngestion/{command_id}:1",
-                "version": 1,
+                "stream": f"ReadingTransaction/{command_id}",
+                "eventId": f"ReadingTransaction/{command_id}:4",
+                "version": 4,
             }
         )
 

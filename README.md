@@ -126,9 +126,19 @@ El buffer tiene límite de 10 000 y Store de 50 000 muestras (más una reserva d
 10 000 para vaciar RAM al descargar/apagar); saturación pausa captura
 y conserva lo ya recibido. Al drenar la cola se reanuda. Errores de credenciales,
 contrato o asociación conservan el lote rechazado para corregir su causa.
+El ACK final de ingestión exige `commandId` idéntico al UUID enviado, stream exacto
+`ReadingTransaction/<UUID>`, versión de tipo entero entre 4 y 103 y
+`eventId: ReadingTransaction/<UUID>:<version>`. HA valida ese contrato sin replicar
+el agrupamiento de familias de Domain. Para comandos aceptados antes de la
+actualización conserva compatibilidad con el recibo legado exacto:
+`ReadingIngestion/<UUID>`, versión entera 1 y `eventId: ReadingIngestion/<UUID>:1`.
+Booleans, otros streams/UUID, versiones fuera de contrato o eventId incoherentes
+no confirman la entrega; el mismo lote permanece pendiente de reintento.
 Si queda capacidad parcial, el writer reduce el prefijo pendiente hasta que cabe,
 confirma su persistencia, retira solo ese prefijo de RAM y despierta al sender.
 No espera a que quepa todo el bloque de RAM para aprovechar los huecos disponibles.
+Un ACK durable despierta al writer que espera capacidad; los errores reales de
+almacenamiento conservan su backoff. Un bloqueo definitivo no libera capacidad.
 Los rechazos **definitivos demostrados por Domain** usan este contrato específico
 de `POST /api/environment/updates` (HTTP **422**):
 

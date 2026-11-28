@@ -286,11 +286,17 @@ class RegistrosClient:
 
     async def push_updates(self, batch: dict) -> None:
         receipt = await self.request("POST", "environment/updates", batch)
+        command_id = batch["commandId"]
+        stream = receipt.get("stream")
+        version = receipt.get("version")
         if (
-            receipt.get("commandId") != batch["commandId"]
-            or receipt.get("stream") != f"ReadingIngestion/{batch['commandId']}"
-            or receipt.get("eventId") != f"ReadingIngestion/{batch['commandId']}:1"
-            or receipt.get("version") != 1
+            receipt.get("commandId") != command_id
+            or type(version) is not int
+            or not (
+                (stream == f"ReadingIngestion/{command_id}" and version == 1)
+                or (stream == f"ReadingTransaction/{command_id}" and 4 <= version <= 103)
+            )
+            or receipt.get("eventId") != f"{stream}:{version}"
         ):
             raise IncompatibleApi("Unexpected durable ingestion acknowledgement")
 

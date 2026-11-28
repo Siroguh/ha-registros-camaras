@@ -309,3 +309,60 @@ async def test_untrusted_status_never_proves_batch_rejection(
     with pytest.raises(ApiError) as caught:
         await client.push_updates({"commandId": "id"})
     assert not isinstance(caught.value, UpdatesRejected)
+
+
+@pytest.mark.parametrize(
+    "stream_kind,version,change,accepted",
+    [
+        ("ReadingIngestion", 1, {}, True),
+        ("ReadingTransaction", 4, {}, True),
+        ("ReadingTransaction", 7, {}, True),
+        ("ReadingTransaction", 103, {}, True),
+        ("ReadingTransaction", 1, {}, False),
+        ("ReadingTransaction", 3, {}, False),
+        ("ReadingTransaction", 104, {}, False),
+        ("ReadingTransaction", True, {}, False),
+        ("ReadingTransaction", 4.0, {}, False),
+        ("ReadingTransaction", "4", {}, False),
+        ("ReadingIngestion", True, {"eventId": "ReadingIngestion/{id}:1"}, False),
+        ("ReadingIngestion", 1.0, {"eventId": "ReadingIngestion/{id}:1"}, False),
+        ("ReadingIngestion", 2, {}, False),
+        ("ReadingTransactionExtra", 4, {}, False),
+        ("OtherStream", 4, {}, False),
+        ("ReadingTransaction", 4, {"commandId": "other-command"}, False),
+        ("ReadingTransaction", 4, {"stream": "ReadingTransaction/other-command"}, False),
+        ("ReadingIngestion", 1, {"stream": "ReadingIngestion/other-command"}, False),
+        ("ReadingTransaction", 4, {"eventId": "ReadingTransaction/{id}:5"}, False),
+        ("ReadingTransaction", 4, {"eventId": "ReadingTransaction/other-command:4"}, False),
+        ("ReadingTransaction", 4, {"eventId": "ReadingIngestion/{id}:4"}, False),
+        ("ReadingIngestion", 1, {"eventId": "ReadingTransaction/{id}:1"}, False),
+        ("ReadingTransaction", None, {}, False),
+    ],
+)
+async def test_updates_final_and_legacy_receipts_are_exact_and_command_bound(
+    aiohttp_client, socket_enabled, stream_kind, version, change, accepted
+):
+    command_id = "00000000-0000-4000-8000-000000000123"
+    receipt = {
+        "commandId": command_id,
+        "stream": f"{stream_kind}/{command_id}",
+        "eventId": f"{stream_kind}/{command_id}:{version}",
+        "version": version,
+        **{key: value.format(id=command_id) for key, value in change.items()},
+    }
+    # The client validates the receipt contract, not Domain's family grouping.
+    batch = {"commandId": command_id}
+
+    async def route(request):
+        assert await request.json() == batch
+        return web.json_response(receipt)
+
+    app = web.Application()
+    app.router.add_post("/api/environment/updates", route)
+    http = await aiohttp_client(app)
+    client = RegistrosClient(http.session, str(http.make_url("/")), "test-key", DEFAULT_CENTRE)
+    if accepted:
+        await client.push_updates(batch)
+    else:
+        with pytest.raises(IncompatibleApi, match="Unexpected durable ingestion acknowledgement"):
+            await client.push_updates(batch)
