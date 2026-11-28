@@ -6,7 +6,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady,
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import ApiError, AuthenticationError, RegistrosClient
+from .api import ApiError, AuthenticationError, RegistrosClient, Snapshot
 from .const import CONF_CENTRE_ID, DEFAULT_CENTRE, DOMAIN
 from .coordinator import RegistrosConfigEntry, RegistrosCoordinator
 from .services import async_register_services
@@ -30,13 +30,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: RegistrosConfigEntry) ->
         entry.data[CONF_CENTRE_ID],
     )
     coordinator = RegistrosCoordinator(hass, entry, client)
-    await coordinator.async_config_entry_first_refresh()
     try:
+        await coordinator.updates.prepare()
+        try:
+            await coordinator.async_config_entry_first_refresh()
+        except ConfigEntryNotReady:
+            cached = coordinator.updates.spool.data
+            if "snapshot" not in cached or "manifest" not in cached:
+                raise
+            # A real last-known projection remains unavailable until polling succeeds.
+            coordinator.data = Snapshot(cached["snapshot"])
+        else:
+            await coordinator.updates.spool.cache(snapshot=coordinator.data.raw)
         await coordinator.updates.start()
+    except ConfigEntryAuthFailed:
+        await coordinator.updates.stop()
+        raise
     except AuthenticationError as err:
+        await coordinator.updates.stop()
         raise ConfigEntryAuthFailed("API key rejected") from err
     except (ApiError, OSError, HomeAssistantError) as err:
+        await coordinator.updates.stop()
         raise ConfigEntryNotReady("Sensor update transport unavailable") from err
+    except BaseException:
+        await coordinator.updates.stop()
+        raise
     entry.runtime_data = coordinator
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

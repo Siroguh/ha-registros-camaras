@@ -4,22 +4,24 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+import hashlib
+import json
 import logging
 import math
 import random
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.const import CONF_URL
+from homeassistant.core import Event, HassJob, HomeAssistant, callback
 from homeassistant.helpers import entity_registry
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_state_report_event,
 )
 
-from .api import IncompatibleApi, RegistrosClient
-from .const import DOMAIN
+from .api import CannotConnect, IncompatibleApi, RegistrosClient, normalize_url
+from .const import CONF_CENTRE_ID, DOMAIN
 from .update_store import MAX_REPORTS, MEMORY_REPORTS, UpdateStore
 
 if TYPE_CHECKING:
@@ -36,7 +38,11 @@ def reading(assignment: dict, state, at: datetime, mode: str) -> dict:
         value = math.nan
     return {
         "assignmentId": assignment["id"],
-        "sourceEventId": at.astimezone(UTC).isoformat(),
+        "sourceEventId": at.astimezone(UTC).isoformat()
+        + ":change:"
+        + hashlib.sha256(
+            json.dumps([state.state, dict(state.attributes)], sort_keys=True, default=str).encode()
+        ).hexdigest(),
         "observedAt": int(at.timestamp() * 1000),
         "value": value if math.isfinite(value) else None,
         "unit": str(state.attributes.get("unit_of_measurement", ""))[:20],
@@ -73,12 +79,37 @@ class Updates:
         self.queue_size = 0
         self.unrecoverable_reports = 0
         self.started_at = int(datetime.now(UTC).timestamp() * 1000)
+        self.prepared = False
+        self.change_counts: dict[str, tuple[datetime, dict[str, int]]] = {}
 
-    async def start(self) -> None:
+    async def prepare(self) -> None:
+        if self.prepared:
+            return
         await self.spool.initialize()
+        destination = hashlib.sha256(
+            json.dumps(
+                [normalize_url(self.entry.data[CONF_URL]), self.entry.data[CONF_CENTRE_ID]]
+            ).encode()
+        ).hexdigest()
+        await self.spool.bind(destination)
+        self.prepared = True
         self.queue_size = await self.spool.size()
         self.paused = self.queue_size >= MAX_REPORTS
-        await self.refresh()
+        if "manifest" in self.spool.data:
+            # Install listeners before either HTTP request can wait on an offline server.
+            await self.apply_manifest(self.spool.data["manifest"])
+
+    async def start(self) -> None:
+        await self.prepare()
+        self.queue_size = await self.spool.size()
+        self.paused = self.queue_size >= MAX_REPORTS
+        try:
+            await self.refresh()
+        except CannotConnect:
+            if "manifest" not in self.spool.data:
+                raise
+            await self.apply_manifest(self.spool.data["manifest"])
+            self.recovery_error = "Offline: capturing with last verified sensor mappings"
         for name, coroutine in (
             ("writer", self.write_loop()),
             ("sender", self.send_loop()),
@@ -92,13 +123,8 @@ class Updates:
                     eager_start=False,
                 )
             )
-        self.entry.async_on_unload(
-            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, self.on_stop)
-        )
+        self.entry.async_on_unload(self.hass.async_add_shutdown_job(HassJob(self.stop)))
         self.send_ready.set()
-
-    async def on_stop(self, _: Event) -> None:
-        await self.stop()
 
     def unsubscribe(self) -> None:
         for unsubscribe in self.unsubscribers:
@@ -124,6 +150,10 @@ class Updates:
 
     async def refresh(self) -> None:
         manifest = await self.client.sensor_stream()
+        await self.apply_manifest(manifest)
+        await self.spool.cache(manifest=manifest)
+
+    async def apply_manifest(self, manifest: dict) -> None:
         sources = {
             url.rstrip("/")
             for url in (self.hass.config.external_url, self.hass.config.internal_url)
@@ -131,7 +161,7 @@ class Updates:
         }
         assignments = [a for a in manifest["assignments"] if a["source"].rstrip("/") in sources]
         if manifest["assignments"] and not assignments:
-            raise IncompatibleApi(
+            self.recovery_error = (
                 "HA internal/external URL does not match a configured sensor source"
             )
         registry = entity_registry.async_get(self.hass)
@@ -173,6 +203,16 @@ class Updates:
             if "last_reported" in event.data:
                 # Equal reports are not Recorder rows; even coincident timestamps are distinct.
                 row["sourceEventId"] += f":report:{uuid4()}"
+            else:
+                previous_at, counts = self.change_counts.get(assignment["id"], (at, {}))
+                if previous_at != at:
+                    counts = {}
+                key = row["sourceEventId"]
+                occurrence = counts.get(key, 0)
+                counts[key] = occurrence + 1
+                self.change_counts[assignment["id"]] = (at, counts)
+                if occurrence:
+                    row["sourceEventId"] += f":occurrence:{occurrence}"
             if row["observedAt"] < assignment["startsAt"]:
                 continue
             if len(self.pending) >= MEMORY_REPORTS:
@@ -247,6 +287,9 @@ class Updates:
         from homeassistant.components.recorder.history import get_significant_states
 
         until = int(datetime.now(UTC).timestamp() * 1000) - 10000
+        recorder = get_instance(self.hass)
+        # Freeze the window first, then synchronize the writer before querying readers.
+        await recorder.async_block_till_done()
         more = False
         if await self.spool.size() >= MAX_REPORTS:
             return False
@@ -261,7 +304,7 @@ class Updates:
             if end <= start:
                 continue
             more = more or end < target
-            groups = await get_instance(self.hass).async_add_executor_job(
+            groups = await recorder.async_add_executor_job(
                 lambda a=assignment, s=start, e=end: get_significant_states(
                     self.hass,
                     datetime.fromtimestamp(s / 1000, UTC) - timedelta(milliseconds=1),
@@ -273,11 +316,18 @@ class Updates:
                     no_attributes=False,
                 )
             )
-            rows = [
-                (assignment["source"], reading(assignment, state, state.last_updated, "history"))
-                for state in groups.get(assignment["entityId"], [])
-                if start <= int(state.last_updated.timestamp() * 1000) < end
-            ]
+            rows = []
+            counts: dict[str, int] = {}
+            for state in groups.get(assignment["entityId"], []):
+                if not start <= int(state.last_updated.timestamp() * 1000) < end:
+                    continue
+                row = reading(assignment, state, state.last_updated, "history")
+                key = row["sourceEventId"]
+                occurrence = counts.get(key, 0)
+                counts[key] = occurrence + 1
+                if occurrence:
+                    row["sourceEventId"] += f":occurrence:{occurrence}"
+                rows.append((assignment["source"], row))
             await self.spool.append(rows, (assignment["id"], end))
             if rows:
                 self.send_ready.set()

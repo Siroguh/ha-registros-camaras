@@ -123,3 +123,55 @@ async def test_reconfigure_moves_identity_and_rejects_duplicate_destination(hass
         )
         assert blocked["reason"] == "already_configured"
         assert entry.data["url"] == changed["url"]
+
+
+async def test_pending_batch_cannot_follow_reconfigured_destination(
+    hass, entry, client, stream_manifest
+):
+    from unittest.mock import AsyncMock
+
+    from custom_components.registros_camaras.update_store import UpdateStore
+
+    hass.config.external_url = "https://home.example"
+    stream_manifest.return_value["assignments"] = [
+        {
+            "id": "a",
+            "source": "https://home.example",
+            "entityId": "sensor.input",
+            "locationId": "cam-1",
+            "metric": "temperature",
+            "position": 1,
+            "startsAt": 0,
+            "endsAt": None,
+            "historyFrom": 0,
+        }
+    ]
+    with patch(
+        "custom_components.registros_camaras.api.RegistrosClient.push_updates", new=AsyncMock()
+    ) as push:
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        hass.states.async_set("sensor.input", "20", {"unit_of_measurement": "°C"})
+        await hass.async_block_till_done()
+        original = await entry.runtime_data.updates.spool.next_batch(DEFAULT_CENTRE)
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": "reconfigure", "entry_id": entry.entry_id},
+            data={**DATA, "url": "https://other.example"},
+        )
+        assert result["reason"] == "reconfigure_successful"
+        await hass.async_block_till_done()
+        assert entry.state is config_entries.ConfigEntryState.SETUP_RETRY
+        push.assert_not_called()
+        retained = UpdateStore(hass, entry.entry_id)
+        await retained.initialize()
+        assert await retained.next_batch(DEFAULT_CENTRE) == original
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": "reconfigure", "entry_id": entry.entry_id},
+            data={**DATA, "api_key": "rotated-key"},
+        )
+        assert result["reason"] == "reconfigure_successful"
+        await hass.async_block_till_done()
+        assert entry.state is config_entries.ConfigEntryState.LOADED
+        assert await entry.runtime_data.updates.spool.next_batch(DEFAULT_CENTRE) == original
+        assert await hass.config_entries.async_unload(entry.entry_id)

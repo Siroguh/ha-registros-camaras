@@ -44,9 +44,27 @@ el mismo UUID y contenido; un reinicio o una respuesta HTTP perdida no duplica l
 lectura. El I/O y la serialización se ejecutan fuera del event loop. La durabilidad
 comienza al verificar el guardado: un apagado abrupto anterior puede perder lo todavía en RAM.
 No borrar la cola para resolver una incidencia de conexión.
+Las muestras se guardan en segmentos inmutables de hasta 1000 reportes; los
+metadatos confirman segmentos, cursores y ACK juntos. Drenar 50 000 reportes en la
+regresión escribe unos 17,2 MB, con commits de hasta 34 KB, sin reescribir la cola
+completa por lote. Los segmentos huérfanos se recogen al abrir y después de commits.
+El apagado se coordina antes de que HA cancele las tareas, espera el executor y
+conserva el respaldo `FINAL_WRITE` con escritura ordenada.
+
+La cola queda vinculada al servidor y centro, sin guardar la clave API. Una rotación
+de clave conserva el destino y reanuda el lote. Reconfigurar otra URL o centro
+bloquea la entrega de la cola anterior y conserva sus datos; volver al destino
+original permite reanudarla. Para un destino independiente se usa otra entrada.
+Las últimas asociaciones verificadas se conservan para ese destino y se escuchan
+antes de esperar a HTTP durante un reinicio sin red. El dashboard conserva su
+última proyección como no disponible hasta recuperar conexión. Un manifiesto que
+retira todas las asociaciones locales retira también sus listeners.
 
 Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
-último cursor persistido. Usa margen de diez segundos y excluye estados sintéticos.
+último cursor persistido. Fija cada ventana, espera la sincronización del escritor
+Recorder (también con `commit_interval=60`) y excluye estados sintéticos. Los cambios
+coincidentes usan tiempo, huella de estado/atributos y ordinal de ocurrencia;
+la recuperación reconstruye esas identidades sin coalescer cambios repetidos.
 Los datos recuperados son históricos y nunca renuevan su tiempo ni activan alertas
 antiguas. Recorder no conserva necesariamente reportes idénticos: no puede recuperar
 todos los reportes durante una pausa de captura, ni datos purgados o excluidos.

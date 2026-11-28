@@ -3,14 +3,17 @@
 import asyncio
 from copy import deepcopy
 import math
+from pathlib import Path
 from uuid import uuid4
 
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
 MAX_REPORTS = 50000
 MEMORY_REPORTS = 10000
+SEGMENT_REPORTS = 1000
 
 
 def identity(source: str, row: dict) -> tuple[str, str, str]:
@@ -26,12 +29,15 @@ class UpdateStore:
         self.store = self.make_store()
         self.lock = asyncio.Lock()
         self.data = {"rows": [], "batch": None, "cursors": {}, "commit": None}
+        self.segments: list[tuple[dict, list]] = []
+        self.final_pending = False
+        self.garbage: set[str] = set()
 
-    def make_store(self) -> Store:
+    def make_store(self, key: str | None = None) -> Store:
         return Store(
             self.hass,
             1,
-            self.key,
+            key or self.key,
             private=True,
             atomic_writes=True,
             serialize_in_event_loop=False,
@@ -40,6 +46,15 @@ class UpdateStore:
     async def initialize(self) -> None:
         value = await self.store.async_load()
         if value is not None:
+            if "segments" in value:
+                rows = []
+                for segment in value["segments"]:
+                    items = await self.make_store(segment["key"]).async_load()
+                    if not isinstance(items, list):
+                        raise HomeAssistantError("Missing sensor update segment")
+                    self.segments.append((segment, items))
+                    rows.extend(items[segment["start"] :])
+                value = {**value, "rows": rows}
             if not (
                 isinstance(value, dict)
                 and isinstance(value.get("rows"), list)
@@ -48,20 +63,105 @@ class UpdateStore:
             ):
                 raise HomeAssistantError("Invalid stored sensor update queue")
             self.data = value
+        self.garbage = await self.hass.async_add_executor_job(
+            lambda: {
+                path.name for path in Path(self.store.path).parent.glob(f"{self.key}.segment.*")
+            }
+        )
+        await self.cleanup()
+
+    async def cleanup(self) -> None:
+        self.garbage.difference_update(d["key"] for d, _ in self.segments)
+        for key in list(self.garbage):
+            try:
+                await self.make_store(key).async_remove()
+            except OSError:
+                continue
+            self.garbage.remove(key)
 
     async def save(self, data: dict) -> None:
-        data = {**data, "commit": str(uuid4())}
-        await self.store.async_save(data)
         if self.hass.state is CoreState.stopping:
-            # Store retains this complete snapshot for HA's FINAL_WRITE event.
-            # Delivery has already stopped, so this cannot acknowledge a server batch.
+            # FINAL_WRITE must commit segments before their metadata, not concurrently.
             self.data = data
+            if not self.final_pending:
+                self.final_pending = True
+                self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_FINAL_WRITE, self.final_write)
             return
-        # Store logs some write errors instead of propagating them. A fresh Store
-        # verifies the committed snapshot before we forget any in-memory reports.
-        if await self.make_store().async_load() != data:
+        task = self.hass.async_create_task(self.commit(data), "registros durable write")
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Keep the lock even if shutdown cancels a previously cancelled writer.
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def final_write(self, _) -> None:
+        async with self.lock:
+            await self.save(self.data)
+            self.final_pending = False
+
+    async def verified_save(self, store: Store, data) -> None:
+        await store.async_save(data)
+        if await self.make_store(store.key).async_load() != data:
             raise HomeAssistantError("Sensor update queue was not persisted")
+
+    async def commit(self, data: dict) -> None:
+        """Immutable bounded segments, then one atomic metadata commit (rows + cursor + ACK)."""
+        remaining = {identity(*item) for item in data["rows"]}
+        known = set()
+        segments = []
+        for descriptor, items in self.segments:
+            start = descriptor["start"]
+            while start < len(items) and identity(*items[start]) not in remaining:
+                start += 1
+            if start < len(items):
+                segments.append(({**descriptor, "start": start}, items))
+                known.update(identity(*item) for item in items[start:])
+        added: dict[str, list] = {}
+        for item in data["rows"]:
+            if identity(*item) not in known:
+                added.setdefault(item[0], []).append(item)
+        for source, items in added.items():
+            # Copy only the incomplete tail of this source; ACK never rewrites samples.
+            tail = next(
+                (i for i in range(len(segments) - 1, -1, -1) if segments[i][1][0][0] == source),
+                None,
+            )
+            if tail is not None:
+                descriptor, prior = segments[tail]
+                active = prior[descriptor["start"] :]
+                if len(active) < SEGMENT_REPORTS:
+                    segments.pop(tail)
+                    items = [*active, *items]
+            for offset in range(0, len(items), SEGMENT_REPORTS):
+                chunk = items[offset : offset + SEGMENT_REPORTS]
+                descriptor = {"key": f"{self.key}.segment.{uuid4()}", "start": 0}
+                self.garbage.add(descriptor["key"])
+                await self.verified_save(self.make_store(descriptor["key"]), chunk)
+                segments.append((descriptor, chunk))
+        metadata = {k: v for k, v in data.items() if k not in {"rows", "segments"}}
+        metadata.update(commit=str(uuid4()), segments=[d for d, _ in segments])
+        await self.verified_save(self.store, metadata)
+        self.garbage.update(d["key"] for d, _ in self.segments)
+        self.segments = segments
         self.data = data
+        await self.cleanup()
+
+    async def bind(self, destination: str) -> None:
+        async with self.lock:
+            previous = self.data.get("destination")
+            if previous is not None and previous != destination:
+                raise HomeAssistantError("Pending sensor storage belongs to another destination")
+            if previous is None:
+                await self.save({**self.data, "destination": destination})
+
+    async def cache(self, **values) -> None:
+        async with self.lock:
+            await self.save({**self.data, **deepcopy(values)})
 
     async def append(
         self,
