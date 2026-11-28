@@ -172,7 +172,17 @@ class UpdateStore:
         remaining = {identity(*item): item for item in data["rows"]}
         known = set()
         segments = []
+        regroup = set()
+        for _, items in self.segments:
+            groups = {(source, row["assignmentId"]) for source, row in items}
+            if len(groups) > 1:
+                regroup.update(groups)
         for descriptor, items in self.segments:
+            if (items[0][0], items[0][1]["assignmentId"]) in regroup:
+                # Migrate every segment of a legacy mixed group in original row order,
+                # including pure tails. Otherwise an old tail could precede its head.
+                # Original files survive until the new index is verified below.
+                continue
             start = descriptor["start"]
             while start < len(items) and identity(*items[start]) not in remaining:
                 start += 1
@@ -188,14 +198,18 @@ class UpdateStore:
                     start = 0
                 segments.append(({**descriptor, "start": start}, items))
                 known.update(identity(*item) for item in items[start:])
-        added: dict[str, list] = {}
+        added: dict[tuple[str, str], list] = {}
         for item in data["rows"]:
             if identity(*item) not in known:
-                added.setdefault(item[0], []).append(item)
-        for source, items in added.items():
-            # Copy only the incomplete tail of this source; ACK never rewrites samples.
+                added.setdefault((item[0], item[1]["assignmentId"]), []).append(item)
+        for group, items in added.items():
+            # Match delivery's source + assignment boundary so ACKs trim prefixes.
             tail = next(
-                (i for i in range(len(segments) - 1, -1, -1) if segments[i][1][0][0] == source),
+                (
+                    i
+                    for i in range(len(segments) - 1, -1, -1)
+                    if (segments[i][1][0][0], segments[i][1][0][1]["assignmentId"]) == group
+                ),
                 None,
             )
             if tail is not None:

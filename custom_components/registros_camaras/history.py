@@ -32,6 +32,23 @@ class HistoryPage:
     end: int
 
 
+def recorder_boundary(millis: int) -> float:
+    """First raw float in the live capture millisecond bucket (datetime rounding).
+
+    Recorder stores floats, while live identities/observedAt use datetime's rounded
+    microseconds. Invert that same monotone conversion, rather than assuming that
+    millis / 1000 is the boundary. Adjacent float bounds keep SQL pages disjoint.
+    """
+    low, high = millis / 1000 - 0.002, millis / 1000 + 0.002
+    while math.nextafter(low, math.inf) < high:
+        middle = low + (high - low) / 2
+        if int(datetime.fromtimestamp(middle, UTC).timestamp() * 1000) < millis:
+            low = middle
+        else:
+            high = middle
+    return high
+
+
 def read_page(hass: HomeAssistant, entity_id: str, start: int, end: int) -> HistoryPage:
     """Read one bounded page, never split a millisecond/coincident occurrence group."""
     from homeassistant.components.recorder import get_instance
@@ -49,8 +66,8 @@ def read_page(hass: HomeAssistant, entity_id: str, start: int, end: int) -> Hist
         if metadata_id is None:
             return HistoryPage([], end)
         stmt = _generate_significant_states_with_session_stmt(
-            math.nextafter(start / 1000, -math.inf),
-            end / 1000,
+            math.nextafter(recorder_boundary(start), -math.inf),
+            recorder_boundary(end),
             metadata_id,
             [metadata_id],
             [],

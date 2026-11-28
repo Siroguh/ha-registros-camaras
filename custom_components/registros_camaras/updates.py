@@ -306,7 +306,16 @@ class Updates:
                     break
                 rows = list(self.pending)[:1000]
                 try:
-                    await self.spool.append(rows)
+                    while True:
+                        try:
+                            await self.spool.append(rows)
+                            break
+                        except ReportCapacityFull:
+                            # Blocked rows may leave less space than this chunk forever.
+                            # Only a successfully committed prefix can leave RAM.
+                            if len(rows) == 1:
+                                raise
+                            rows = rows[: len(rows) // 2]
                 except Exception as err:
                     # Never remove a report when persistence fails.
                     self.error = f"Local persistence failed ({type(err).__name__})"

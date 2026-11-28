@@ -47,6 +47,12 @@ No borrar la cola para resolver una incidencia de conexión.
 El índice usa la versión de Store 2 y migra el índice v1 conservando muestras,
 cursores y UUID/payload pendiente. Un cliente antiguo no puede abrir el índice v2:
 así se impide que desconozca los bloqueados y los reenvíe con comandos nuevos.
+Los segmentos nuevos separan fuente y asociación, igual que los lotes de envío:
+sus ACK avanzan el prefijo sin reescribir las muestras de otras asociaciones.
+Los segmentos mixtos anteriores se reagrupan en el siguiente commit, conservando
+sus archivos hasta verificar el índice nuevo y manteniendo UUID/payload congelados.
+La regresión intercalada de 36 asociaciones y 3600 reportes no reescribe segmentos
+al drenar una cola nueva; una cola legada se reagrupa una sola vez.
 Las muestras se guardan en segmentos inmutables de hasta 1000 reportes; los
 metadatos confirman segmentos, cursores y ACK juntos. Drenar 50 000 reportes en la
 regresión escribe unos 17,2 MB, con commits de hasta 34 KB, sin reescribir la cola
@@ -76,6 +82,9 @@ La caché del dashboard sigue los sondeos verificados: escribe como máximo una 
 por minuto durante ejecución y vacía la última proyección al descargar/apagar.
 Solo esta caché reconstruible se coalesce, nunca las muestras de sensores. Un fallo
 de caché se diagnostica y reintenta sin ocultar el recibo de un comando aceptado.
+Si falla la primera escritura y su limpieza durante setup, HA mantiene el
+reintento automático de configuración. Las entradas ya cargadas conservan su
+vaciado completo durante descarga/apagado.
 
 Recorder reconcilia huecos cada cinco minutos desde el inicio del transporte o el
 último cursor persistido. Fija cada ventana, espera la sincronización del escritor
@@ -94,6 +103,9 @@ con `limit` omite cambios de atributos: se aíslan aquí los helpers internos de
 sin SQL textual, conexión propia ni esquema paralelo. Requieren pruebas con Recorder
 real al actualizar HA. Las páginas y las adaptaciones al espacio libre terminan
 entre milisegundos completos, sin dividir/reidentificar ocurrencias coincidentes.
+Los límites SQL se calculan con el mismo redondeo float→datetime que la captura
+live; una fila justo antes del límite que redondea hacia él pasa a la página
+siguiente sin perderse ni cambiar de identidad.
 Si un único milisegundo supera 1000 filas, se conserva su cursor pendiente y se
 diagnostica el límite; las demás asociaciones siguen recuperándose. No se afirma
 que ese grupo excesivo se haya recuperado. El orden de atención rota entre pasadas.
@@ -114,6 +126,9 @@ El buffer tiene límite de 10 000 y Store de 50 000 muestras (más una reserva d
 10 000 para vaciar RAM al descargar/apagar); saturación pausa captura
 y conserva lo ya recibido. Al drenar la cola se reanuda. Errores de credenciales,
 contrato o asociación conservan el lote rechazado para corregir su causa.
+Si queda capacidad parcial, el writer reduce el prefijo pendiente hasta que cabe,
+confirma su persistencia, retira solo ese prefijo de RAM y despierta al sender.
+No espera a que quepa todo el bloque de RAM para aprovechar los huecos disponibles.
 Los rechazos **definitivos demostrados por Domain** usan este contrato específico
 de `POST /api/environment/updates` (HTTP **422**):
 
